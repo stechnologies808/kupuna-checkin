@@ -1,0 +1,33 @@
+# Render Blueprint: Render reads this when you choose New → Blueprint.
+services:
+  - type: web
+    name: kupuna-checkin
+    runtime: python
+    plan: starter            # always on. The free plan sleeps and would miss morning calls.
+    region: oregon           # closest Render region to Hawaii
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 --threads 4 -b 0.0.0.0:$PORT app:app
+    healthCheckPath: /health
+    disk:
+      name: checkin-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: DATABASE_PATH
+        value: /var/data/checkin.db
+      - key: TIMEZONE
+        value: Pacific/Honolulu
+      - key: SERVICE_NAME
+        value: Kupuna Check-In
+      - key: DRY_RUN
+        value: "1"           # switch to 0 in the dashboard once your Twilio details are in
+      - key: ADMIN_PASSWORD
+        sync: false          # Render asks you for these when you create the service
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
