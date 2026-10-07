@@ -164,6 +164,8 @@ class Engine:
             raise ValueError("Please add " + ", ".join(missing) + ".")
         if f["plan"] not in self.PLANS:
             raise ValueError("Please choose a plan.")
+        if f["plan"] == "talk_story" and not self.cfg.OFFER_TALK_STORY:
+            raise ValueError("The Talk Story plan isn't available yet. Please choose Daily Check-In.")
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", f["family_email"]):
             raise ValueError("That email address doesn't look right.")
         if len(f["notes"]) > 1000 or any(len(f[k]) > 120 for k in self.SIGNUP_FIELDS if k != "notes"):

@@ -62,6 +62,8 @@ class Config:
     PAYMENT_LINK_TALK_STORY = os.environ.get("PAYMENT_LINK_TALK_STORY", "")
     PRICE_BASIC = os.environ.get("PRICE_BASIC", "$12/month")
     PRICE_TALK_STORY = os.environ.get("PRICE_TALK_STORY", "$39/month")
+    # Show the Talk Story plan on the sign-up page? Off until you're ready to make the weekly calls.
+    OFFER_TALK_STORY = _bool("OFFER_TALK_STORY", False)
     FREE_TRIAL_NOTE = os.environ.get("FREE_TRIAL_NOTE", "First month free while we're getting started.")
 
     RING_SECONDS = int(os.environ.get("RING_SECONDS", 25))

@@ -98,6 +98,9 @@ To take payment, create a Stripe Payment Link for each plan and set `PAYMENT_LIN
 `PAYMENT_LINK_TALK_STORY`. The thank-you page then shows a **Set up payment** button. Prices and
 the free-trial line on the page come from `PRICE_BASIC`, `PRICE_TALK_STORY` and `FREE_TRIAL_NOTE`.
 
+The Talk Story plan is hidden until you set `OFFER_TALK_STORY=1`, since its weekly live calls are
+made by a person. While hidden, the page offers only Daily Check-In.
+
 ## 4. Before you take money
 
 - **Written consent.** Automated calls fall under the federal robocall law (TCPA). Get

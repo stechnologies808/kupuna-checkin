@@ -48,6 +48,8 @@ p{margin:0;max-width:62ch}.mu{color:var(--mu)}
 .steps li{background:var(--s);border:1px solid var(--line);border-radius:12px;padding:16px;counter-increment:s;display:grid;gap:4px;align-content:start}
 .steps li::before{content:counter(s);font-family:var(--display);font-weight:800;font-size:22px;color:var(--ac)}
 .plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.plans.one{grid-template-columns:minmax(0,1fr)}
+.plans.one .plan{cursor:default;border-color:var(--line)}
 .plan{position:relative;background:var(--s);border:2px solid var(--line);border-radius:12px;padding:16px 18px;cursor:pointer;display:grid;gap:6px;font-weight:400;font-size:16px}
 .plan:has(input:checked){border-color:var(--ac)}
 .plan input{position:absolute;opacity:0}
@@ -88,6 +90,16 @@ def signup_page(cfg, form=None, error=""):
     form = form or {}
     plan = form.get("plan", "basic")
     trial = f"<p class='note'>{escape(cfg.FREE_TRIAL_NOTE)}</p>" if cfg.FREE_TRIAL_NOTE else ""
+    if not cfg.OFFER_TALK_STORY:
+        plan = "basic"
+    basic = (f"<label class=\"plan\"><input type=\"radio\" name=\"plan\" value=\"basic\" {'checked' if plan == 'basic' else ''}>"
+             f"<h3>Daily Check-In</h3><span class=\"price\">{escape(cfg.PRICE_BASIC)}</span>"
+             "<span class=\"mu\">Automated morning call, family alerts, and a weekly summary text.</span></label>")
+    talk = (f"<label class=\"plan\"><input type=\"radio\" name=\"plan\" value=\"talk_story\" {'checked' if plan == 'talk_story' else ''}>"
+            f"<h3>Talk Story</h3><span class=\"price\">{escape(cfg.PRICE_TALK_STORY)}</span>"
+            "<span class=\"mu\">Everything in Daily Check-In, plus a weekly 15-minute call with a real person.</span></label>")
+    plans_html = (f'<div class="plans" role="radiogroup" aria-label="Plan">{basic}{talk}</div>' if cfg.OFFER_TALK_STORY
+                  else f'<div class="plans one">{basic}</div>')
     return (PUBLIC_HEAD.replace("{title}", "Kupuna Check-In · Sign up") + f"""
 <section class="hero">
   <span class="eyebrow">Oʻahu · daily check-in calls</span>
@@ -103,14 +115,7 @@ def signup_page(cfg, form=None, error=""):
 {trial}
 {f"<p class='err' role='alert'>{escape(error)}</p>" if error else ""}
 <form method="post" action="{url_for('signup_submit')}" novalidate>
-  <div class="plans" role="radiogroup" aria-label="Plan">
-    <label class="plan"><input type="radio" name="plan" value="basic" {'checked' if plan == 'basic' else ''}>
-      <h3>Daily Check-In</h3><span class="price">{escape(cfg.PRICE_BASIC)}</span>
-      <span class="mu">Automated morning call, family alerts, and a weekly summary text.</span></label>
-    <label class="plan"><input type="radio" name="plan" value="talk_story" {'checked' if plan == 'talk_story' else ''}>
-      <h3>Talk Story</h3><span class="price">{escape(cfg.PRICE_TALK_STORY)}</span>
-      <span class="mu">Everything in Daily Check-In, plus a weekly 15-minute call with a real person.</span></label>
-  </div>
+{plans_html}
 
   <fieldset><legend>About you</legend>
     <label>Your name<input id="family_name" name="family_name" autocomplete="name" value="{_v(form,'family_name')}"></label>
