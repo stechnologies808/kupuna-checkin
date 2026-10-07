@@ -95,28 +95,58 @@ class Engine:
         return h < self.cfg.QUIET_BEFORE_HOUR or h >= self.cfg.QUIET_AFTER_HOUR
 
     # ---------- sign-up ----------
-    def add_kupuna(self, *, name, phone, call_time, language, contact1_name, contact1_phone,
-                   contact2_name, contact2_phone, consent_note) -> int:
-        if not consent_note.strip():
+    FIELDS = ("name", "phone", "call_time", "language", "contact1_name", "contact1_phone",
+              "contact2_name", "contact2_phone", "consent_note")
+
+    def _clean(self, f: dict) -> dict:
+        f = {k: (f.get(k) or "").strip() for k in self.FIELDS}
+        for k, label in (("name", "their name"), ("contact1_name", "the family contact's name"),
+                         ("contact2_name", "the backup contact's name")):
+            if not f[k]:
+                raise ValueError(f"Add {label}.")
+        if not f["consent_note"]:
             raise ValueError("Record who agreed to automated calls, how, and when (consent_note).")
-        if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", call_time):
+        if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", f["call_time"]):
             raise ValueError("call_time must look like 08:30")
-        hour = int(call_time.split(":")[0])
+        hour = int(f["call_time"].split(":")[0])
         if hour < self.cfg.QUIET_BEFORE_HOUR or hour >= self.cfg.QUIET_AFTER_HOUR:
             raise ValueError(f"Pick a call time between {self.cfg.QUIET_BEFORE_HOUR}:00 and {self.cfg.QUIET_AFTER_HOUR}:00.")
-        if language not in greetings.GREETING:
+        if f["language"] not in greetings.GREETING:
             raise ValueError(f"language must be one of {', '.join(greetings.GREETING)}")
+        for k in ("phone", "contact1_phone", "contact2_phone"):
+            f[k] = normalize_phone(f[k])
+        f["call_time"] = "%02d:%s" % (hour, f["call_time"].split(":")[1])
+        return f
+
+    def add_kupuna(self, **fields) -> int:
+        f = self._clean(fields)
         now = iso(self.clock())
         cur = self.db.execute(
-            """INSERT INTO kupuna (name, phone, call_time, language, contact1_name, contact1_phone,
-               contact2_name, contact2_phone, consent_note, consent_at, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (name.strip(), normalize_phone(phone), call_time, language, contact1_name.strip(),
-             normalize_phone(contact1_phone), contact2_name.strip(), normalize_phone(contact2_phone),
-             consent_note.strip(), now, now),
+            f"INSERT INTO kupuna ({', '.join(self.FIELDS)}, consent_at, created_at) "
+            f"VALUES ({', '.join('?' * (len(self.FIELDS) + 2))})",
+            (*(f[k] for k in self.FIELDS), now, now),
         )
-        self.log(None, cur.lastrowid, "signup", f"Added {name.strip()} · calls at {call_time} in {language}")
+        self.log(None, cur.lastrowid, "signup", f"Added {f['name']} · calls at {f['call_time']} in {f['language']}")
         return cur.lastrowid
+
+    def update_kupuna(self, kupuna_id: int, **fields) -> None:
+        old = self.kupuna(kupuna_id)
+        if not old:
+            raise ValueError(f"No kūpuna with id {kupuna_id}")
+        f = self._clean(fields)
+        changed = [k for k in self.FIELDS if f[k] != old[k]]
+        if not changed:
+            return
+        sets = ", ".join(f"{k}=?" for k in changed)
+        vals = [f[k] for k in changed]
+        if "consent_note" in changed:
+            sets += ", consent_at=?"
+            vals.append(iso(self.clock()))
+        self.db.execute(f"UPDATE kupuna SET {sets} WHERE id=?", (*vals, kupuna_id))
+        labels = {"name": "name", "phone": "phone", "call_time": "call time", "language": "language",
+                  "contact1_name": "family contact", "contact1_phone": "family phone",
+                  "contact2_name": "backup contact", "contact2_phone": "backup phone", "consent_note": "consent note"}
+        self.log(None, kupuna_id, "signup", f"Updated {f['name']}: {', '.join(labels[k] for k in changed)}")
 
     def call_now(self, kupuna_id: int) -> int:
         """Start (or restart) today's check-in right away. For testing with your own phone."""

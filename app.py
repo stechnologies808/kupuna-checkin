@@ -118,7 +118,7 @@ th{color:var(--mu);font-size:12px;text-transform:uppercase;letter-spacing:.05em}
 .ok{background:var(--okb);color:var(--ok)}.warn{background:var(--warnb);color:var(--warn)}.bad{background:var(--badb);color:var(--bad)}.idle{background:var(--idb);color:var(--mu)}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--mu);white-space:nowrap}
 .dry{background:var(--warnb);color:var(--warn);padding:8px 12px;border-radius:8px;font-weight:600}
-form.inline{display:inline}button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);cursor:pointer}
+form.inline{display:inline}a.btn{display:inline-block;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);text-decoration:none}button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);cursor:pointer}
 .add{display:grid;gap:10px;padding:14px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
 .add label{display:grid;gap:3px;font-size:13px;font-weight:600}.add input,.add select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 .err{color:var(--bad);font-weight:600}.mu{color:var(--mu)}
@@ -128,16 +128,7 @@ form.inline{display:inline}button{font:inherit;padding:4px 10px;border-radius:6p
 <section><h2>Today</h2><div class="box"><table><tr><th>Kūpuna</th><th>Call time</th><th>Status</th><th>Tries</th><th></th></tr>{rows}</table></div></section>
 <section><h2>Recent activity</h2><div class="box"><table><tr><th>Time</th><th>What happened</th></tr>{events}</table></div></section>
 <section><h2>Add a kūpuna</h2><div class="box"><form class="add" method="post" action="{add_url}">
-<label>Name<input name="name" required placeholder="Auntie Leilani Kekona"></label>
-<label>Phone<input name="phone" required placeholder="808-555-0142"></label>
-<label>Call time<input name="call_time" type="time" value="09:00" required></label>
-<label>Language<select name="language"><option>English</option><option>Pidgin</option><option>Ilocano</option><option>Japanese</option></select></label>
-<label>Family contact name<input name="contact1_name" required></label>
-<label>Family contact phone<input name="contact1_phone" required></label>
-<label>Backup contact name<input name="contact2_name" required></label>
-<label>Backup contact phone<input name="contact2_phone" required></label>
-<label style="grid-column:1/-1">Consent (who agreed in writing, and when)<input name="consent_note" required placeholder="Signed form from Leilani Kekona, 10/6/2026, kept in binder"></label>
-<div><button type="submit">Add to the list</button></div></form></div></section>
+{add_fields}<div><button type="submit">Add to the list</button></div></form></div></section>
 </main><script>
 // Refresh every 30 s to show new activity, but never while someone is filling in the form.
 setInterval(function(){
@@ -146,6 +137,31 @@ setInterval(function(){
   if(!typing) location.reload();
 },30000);
 </script></body></html>"""
+
+
+LANGUAGES = ("English", "Pidgin", "Ilocano", "Japanese")
+FORM_FIELDS = [  # (field, label, placeholder)
+    ("name", "Name", "Auntie Leilani Kekona"), ("phone", "Phone", "808-555-0142"),
+    ("call_time", "Call time", ""), ("language", "Language", ""),
+    ("contact1_name", "Family contact name", ""), ("contact1_phone", "Family contact phone", ""),
+    ("contact2_name", "Backup contact name", ""), ("contact2_phone", "Backup contact phone", ""),
+    ("consent_note", "Consent (who agreed in writing, and when)", "Signed form from Leilani Kekona, 10/6/2026, kept in binder"),
+]
+
+
+def form_fields(values: dict, placeholders: bool = False) -> str:
+    out = []
+    for key, label, ph_text in FORM_FIELDS:
+        v = escape(str(values.get(key) or ""))
+        if key == "language":
+            opts = "".join(f"<option{' selected' if values.get('language') == l else ''}>{l}</option>" for l in LANGUAGES)
+            out.append(f"<label>{label}<select name='language'>{opts}</select></label>")
+            continue
+        typ = "time" if key == "call_time" else "text"
+        style = " style='grid-column:1/-1'" if key == "consent_note" else ""
+        ph_attr = f" placeholder='{escape(ph_text)}'" if placeholders and ph_text else ""
+        out.append(f"<label{style}>{label}<input name='{key}' type='{typ}' value='{v}' required{ph_attr}></label>")
+    return "\n".join(out)
 
 
 @app.get("/")
@@ -174,7 +190,8 @@ def admin():
             f"<td class='mono'>{escape(k['call_time'])}</td><td><span class='pill {tone}'>{escape(label)}</span></td>"
             f"<td class='mono'>{c['attempts'] if c else 0}</td><td>"
             f"<form class='inline' method='post' action='{url_for('admin_call_now', kupuna_id=k['id'])}'><button>Call now</button></form> "
-            f"<form class='inline' method='post' action='{url_for('admin_toggle', kupuna_id=k['id'])}'><button>{toggle}</button></form></td></tr>")
+            f"<form class='inline' method='post' action='{url_for('admin_toggle', kupuna_id=k['id'])}'><button>{toggle}</button></form> "
+            f"<a class='btn' href='{url_for('admin_edit', kupuna_id=k['id'])}'>Edit</a></td></tr>")
     ev = "".join(f"<tr><td class='mono'>{escape(engine.local(db.parse(e['at'])).strftime('%a %-I:%M %p'))}</td>"
                  f"<td>{escape(e['detail'])}</td></tr>" for e in events)
     flash = request.args.get("msg", "")
@@ -183,7 +200,8 @@ def admin():
             .replace("{flash}", f"<p class='err'>{escape(flash)}</p>" if flash else "")
             .replace("{rows}", "".join(rows) or "<tr><td colspan='5' class='mu'>No kūpuna yet. Add one below.</td></tr>")
             .replace("{events}", ev or "<tr><td colspan='2' class='mu'>Nothing yet.</td></tr>")
-            .replace("{add_url}", url_for("admin_add")))
+            .replace("{add_url}", url_for("admin_add"))
+            .replace("{add_fields}", form_fields({"call_time": "09:00"}, placeholders=True)))
     return html
 
 
@@ -198,6 +216,35 @@ def admin_add():
                 "contact2_name", "contact2_phone", "consent_note")})
     except ValueError as e:
         return redirect(url_for("admin", msg=str(e)))
+    return redirect(url_for("admin"))
+
+
+@app.get("/admin/edit/<int:kupuna_id>")
+@admin_only
+def admin_edit(kupuna_id):
+    with lock:
+        k = engine.kupuna(kupuna_id)
+    if not k:
+        return redirect(url_for("admin", msg="That person isn't on the list."))
+    head = PAGE[:PAGE.index("<header>")]
+    flash = request.args.get("msg", "")
+    return (head + f"<header><h1>Edit {escape(k['name'])}</h1>"
+            f"<p class='mu'><a href='{url_for('admin')}'>Back to today</a></p></header>"
+            + (f"<p class='err'>{escape(flash)}</p>" if flash else "")
+            + f"<section><div class='box'><form class='add' method='post' action='{url_for('admin_edit_save', kupuna_id=kupuna_id)}'>"
+            + form_fields(dict(k))
+            + f"<div><button type='submit'>Save changes</button> <a class='btn' href='{url_for('admin')}'>Cancel</a></div>"
+            "</form></div></section></main></body></html>")
+
+
+@app.post("/admin/edit/<int:kupuna_id>")
+@admin_only
+def admin_edit_save(kupuna_id):
+    try:
+        with lock:
+            engine.update_kupuna(kupuna_id, **{k: request.form.get(k, "") for k in engine.FIELDS})
+    except ValueError as e:
+        return redirect(url_for("admin_edit", kupuna_id=kupuna_id, msg=str(e)))
     return redirect(url_for("admin"))
 
 
