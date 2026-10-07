@@ -105,7 +105,7 @@ STATUS_LABEL = {
 }
 
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="30">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Kupuna Check-In · Today</title><style>
 :root{--bg:#F1F4F2;--s:#fff;--line:#D3DCD8;--fg:#17221F;--mu:#5A6964;--ok:#1F7A4D;--okb:#DDF0E5;--warn:#9A6200;--warnb:#FBEBCB;--bad:#B3322B;--badb:#F8DEDB;--idb:#E6ECE9}
 @media (prefers-color-scheme:dark){:root{--bg:#111816;--s:#18211E;--line:#2C3934;--fg:#E7EEEB;--mu:#9AABA5;--ok:#6FD39E;--okb:#173326;--warn:#F2BE5C;--warnb:#3A2C10;--bad:#F48A80;--badb:#3F1C19;--idb:#1F2A26;color-scheme:dark}}
@@ -123,7 +123,7 @@ form.inline{display:inline}button{font:inherit;padding:4px 10px;border-radius:6p
 .add label{display:grid;gap:3px;font-size:13px;font-weight:600}.add input,.add select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 .err{color:var(--bad);font-weight:600}.mu{color:var(--mu)}
 </style></head><body><main>
-<header><h1>Kupuna Check-In</h1><p class="mu">{today} · refreshes every 30 seconds</p></header>
+<header><h1>Kupuna Check-In</h1><p class="mu">{today} · updates every 30 seconds (paused while you fill in the form)</p></header>
 {dry}{flash}
 <section><h2>Today</h2><div class="box"><table><tr><th>Kūpuna</th><th>Call time</th><th>Status</th><th>Tries</th><th></th></tr>{rows}</table></div></section>
 <section><h2>Recent activity</h2><div class="box"><table><tr><th>Time</th><th>What happened</th></tr>{events}</table></div></section>
@@ -138,7 +138,14 @@ form.inline{display:inline}button{font:inherit;padding:4px 10px;border-radius:6p
 <label>Backup contact phone<input name="contact2_phone" required></label>
 <label style="grid-column:1/-1">Consent (who agreed in writing, and when)<input name="consent_note" required placeholder="Signed form from Leilani Kekona, 10/6/2026, kept in binder"></label>
 <div><button type="submit">Add to the list</button></div></form></div></section>
-</main></body></html>"""
+</main><script>
+// Refresh every 30 s to show new activity, but never while someone is filling in the form.
+setInterval(function(){
+  var typing=[].some.call(document.querySelectorAll('form.add input'),function(i){return i.value&&i.type!=='time';})
+    || (document.activeElement && document.activeElement.closest && document.activeElement.closest('form.add'));
+  if(!typing) location.reload();
+},30000);
+</script></body></html>"""
 
 
 @app.get("/")
