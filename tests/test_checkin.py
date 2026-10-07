@@ -503,6 +503,30 @@ class SignupFlow(unittest.TestCase):
         self.assertEqual(self.m.engine.signup(sid)["status"], "declined")
         self.assertEqual(self.m.engine.db.execute("SELECT COUNT(*) FROM kupuna").fetchone()[0], 0)
 
+    def test_talk_story_hidden_by_default(self):
+        body = self.client.get("/signup").get_data(as_text=True)
+        self.assertNotIn("Talk Story", body)
+        self.assertNotIn("$39", body)
+        self.assertIn("Daily Check-In", body)
+        r = self.post(plan="talk_story")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("isn&#x27;t available yet", r.get_data(as_text=True))
+        self.assertEqual(self.m.engine.db.execute("SELECT COUNT(*) FROM signups").fetchone()[0], 0)
+        self.assertEqual(self.post().status_code, 200, "basic plan still works")
+
+    def test_talk_story_shown_when_turned_on(self):
+        cfg = self.m.engine.cfg
+        old = cfg.OFFER_TALK_STORY
+        cfg.OFFER_TALK_STORY = True
+        try:
+            body = self.client.get("/signup").get_data(as_text=True)
+            self.assertIn("Talk Story", body)
+            self.assertIn("$39/month", body)
+            self.assertEqual(self.post(plan="talk_story").status_code, 200)
+            self.assertEqual(self.m.engine.db.execute("SELECT plan FROM signups").fetchone()[0], "talk_story")
+        finally:
+            cfg.OFFER_TALK_STORY = old
+
     def test_review_page_needs_password(self):
         self.assertEqual(self.client.get("/admin/signup/1").status_code, 401)
 
