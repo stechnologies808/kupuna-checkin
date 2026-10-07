@@ -48,7 +48,7 @@ p{margin:0;max-width:62ch}.mu{color:var(--mu)}
 .steps li{background:var(--s);border:1px solid var(--line);border-radius:12px;padding:16px;counter-increment:s;display:grid;gap:4px}
 .steps li::before{content:counter(s);font-family:var(--display);font-weight:800;font-size:22px;color:var(--ac)}
 .plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
-.plan{position:relative;background:var(--s);border:2px solid var(--line);border-radius:12px;padding:16px 18px;cursor:pointer;display:grid;gap:6px}
+.plan{position:relative;background:var(--s);border:2px solid var(--line);border-radius:12px;padding:16px 18px;cursor:pointer;display:grid;gap:6px;font-weight:400;font-size:16px}
 .plan:has(input:checked){border-color:var(--ac)}
 .plan input{position:absolute;opacity:0}
 .plan .price{font-family:var(--display);font-size:26px;font-weight:800}
