@@ -45,7 +45,7 @@ p{margin:0;max-width:62ch}.mu{color:var(--mu)}
 .eyebrow{font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ac)}
 .hero{display:grid;gap:12px}
 .steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;list-style:none;padding:0;margin:0;counter-reset:s}
-.steps li{background:var(--s);border:1px solid var(--line);border-radius:12px;padding:16px;counter-increment:s;display:grid;gap:4px}
+.steps li{background:var(--s);border:1px solid var(--line);border-radius:12px;padding:16px;counter-increment:s;display:grid;gap:4px;align-content:start}
 .steps li::before{content:counter(s);font-family:var(--display);font-weight:800;font-size:22px;color:var(--ac)}
 .plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .plan{position:relative;background:var(--s);border:2px solid var(--line);border-radius:12px;padding:16px 18px;cursor:pointer;display:grid;gap:6px;font-weight:400;font-size:16px}
@@ -56,15 +56,17 @@ p{margin:0;max-width:62ch}.mu{color:var(--mu)}
 form{display:grid;gap:22px}
 fieldset{border:1px solid var(--line);border-radius:12px;background:var(--s);padding:16px 18px 18px;margin:0;display:grid;gap:14px;grid-template-columns:repeat(2,minmax(0,1fr))}
 legend{font-family:var(--display);font-weight:600;font-size:19px;padding:0 6px}
-label{display:grid;gap:4px;font-weight:700;font-size:15px}
+label{display:grid;gap:4px;font-weight:700;font-size:15px;align-content:start}
 label .hint{font-weight:400;color:var(--mu);font-size:14px}
-input,select,textarea{font:inherit;font-weight:400;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);width:100%}
+input,select,textarea{font:inherit;font-weight:400;padding:10px 12px;min-height:46px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);width:100%}
 textarea{min-height:80px}
+input:not([type=checkbox]):not([type=radio]),select{height:46px;min-height:0}
 .full{grid-column:1/-1}
 .check{display:flex;gap:10px;align-items:flex-start;font-weight:400}
-.check input{width:auto;margin-top:5px}
+.check input{width:auto;height:auto;min-height:0;margin-top:5px}
 button,.btn{font:inherit;font-weight:700;background:var(--ac);color:var(--acink);border:0;border-radius:10px;padding:13px 22px;cursor:pointer;text-decoration:none;display:inline-block;justify-self:start}
 :focus-visible{outline:3px solid var(--ac);outline-offset:2px}
+.err,.note{max-width:none}
 .err{background:var(--badb);color:var(--bad);padding:12px 14px;border-radius:10px;font-weight:700}
 .note{background:var(--okb);color:var(--ok);padding:12px 14px;border-radius:10px;font-weight:700}
 .trap{position:absolute;left:-9999px}
@@ -113,14 +115,14 @@ def signup_page(cfg, form=None, error=""):
   <fieldset><legend>About you</legend>
     <label>Your name<input id="family_name" name="family_name" autocomplete="name" value="{_v(form,'family_name')}"></label>
     <label>Relationship to your kūpuna<input id="relationship" name="relationship" placeholder="Son, daughter, niece…" value="{_v(form,'relationship')}"></label>
-    <label>Your mobile phone<span class="hint">Alerts are texted here</span><input id="family_phone" name="family_phone" type="tel" autocomplete="tel" value="{_v(form,'family_phone')}"></label>
+    <label>Your mobile phone<input id="family_phone" name="family_phone" type="tel" autocomplete="tel" value="{_v(form,'family_phone')}"><span class="hint">Alerts are texted here</span></label>
     <label>Your email<input id="family_email" name="family_email" type="email" autocomplete="email" value="{_v(form,'family_email')}"></label>
   </fieldset>
 
   <fieldset><legend>About your kūpuna</legend>
-    <label>Their name<span class="hint">How the call should greet them, e.g. Auntie Leilani</span><input id="kupuna_name" name="kupuna_name" value="{_v(form,'kupuna_name')}"></label>
-    <label>Their phone<span class="hint">The phone they'll answer each morning</span><input id="kupuna_phone" name="kupuna_phone" type="tel" value="{_v(form,'kupuna_phone')}"></label>
-    <label>Call time<span class="hint">Hawaiʻi time, between 7 AM and 9 PM</span><input id="call_time" name="call_time" type="time" value="{_v(form,'call_time','09:00')}"></label>
+    <label>Their name<input id="kupuna_name" name="kupuna_name" value="{_v(form,'kupuna_name')}"><span class="hint">How the call should greet them, e.g. Auntie Leilani</span></label>
+    <label>Their phone<input id="kupuna_phone" name="kupuna_phone" type="tel" value="{_v(form,'kupuna_phone')}"><span class="hint">The phone they'll answer each morning</span></label>
+    <label>Call time<input id="call_time" name="call_time" type="time" value="{_v(form,'call_time','09:00')}"><span class="hint">Hawaiʻi time, between 7 AM and 9 PM</span></label>
     <label>Language for the call{_sel('language', LANGUAGES, form.get('language', 'English'))}</label>
   </fieldset>
 
@@ -128,8 +130,7 @@ def signup_page(cfg, form=None, error=""):
     <p class="full mu small">Someone nearby we can reach if you don't reply within 15 minutes: a sibling, neighbor, or church friend.</p>
     <label>Backup's name<input id="backup_name" name="backup_name" value="{_v(form,'backup_name')}"></label>
     <label>Backup's phone<input id="backup_phone" name="backup_phone" type="tel" value="{_v(form,'backup_phone')}"></label>
-    <label class="full">Anything we should know? <span class="hint">Hearing, best way to reach them, etc. (optional)</span>
-      <textarea id="notes" name="notes">{_v(form,'notes')}</textarea></label>
+    <label class="full">Anything we should know?<textarea id="notes" name="notes">{_v(form,'notes')}</textarea><span class="hint">Hearing, best way to reach them, etc. (optional)</span></label>
   </fieldset>
 
   <label class="trap" aria-hidden="true">Leave this empty<input name="website" tabindex="-1" autocomplete="off"></label>
