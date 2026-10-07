@@ -47,10 +47,12 @@ def normalize_phone(raw: str) -> str:
     digits = re.sub(r"\D", "", raw)
     if raw.startswith("+"):
         return "+" + digits
-    if len(digits) == 10:
-        return "+1" + digits
     if len(digits) == 11 and digits.startswith("1"):
-        return "+" + digits
+        digits = digits[1:]
+    if len(digits) == 10:
+        if digits[0] in "01" or digits[3] in "01":
+            raise ValueError(f"{raw!r} isn't a real phone number. Check the area code and number.")
+        return "+1" + digits
     raise ValueError(f"Can't read phone number {raw!r}. Use a 10-digit number like 808-555-0142.")
 
 
@@ -79,6 +81,19 @@ class Engine:
             "INSERT INTO events (checkin_id, kupuna_id, at, kind, detail) VALUES (?,?,?,?,?)",
             (checkin["id"] if checkin else None, kupuna_id, iso(self.clock()), kind, detail),
         )
+
+    def _send(self, kind: str, to: str, content: str, checkin=None, kupuna_id=None, who: str = "") -> bool:
+        """Send a text ('sms') or alert call ('alert'). Returns False and logs the reason if it fails."""
+        try:
+            if kind == "sms":
+                self.phone.send_sms(to, content)
+            else:
+                self.phone.alert_call(to, content)
+            return True
+        except Exception as e:  # bad number, Twilio outage, etc.
+            what = "text" if kind == "sms" else "call"
+            self.log(checkin, kupuna_id, "error", f"Couldn't {what} {who or to} ({to}): {e}")
+            return False
 
     def kupuna(self, kupuna_id: int) -> sqlite3.Row:
         return self.db.execute("SELECT * FROM kupuna WHERE id=?", (kupuna_id,)).fetchone()
@@ -269,13 +284,19 @@ class Engine:
             "SELECT * FROM checkins WHERE next_at IS NOT NULL AND next_at <= ? ORDER BY next_at", (iso(now),)
         ).fetchall()
         for c in due:
-            if c["status"] in ("scheduled", "waiting_retry"):
-                self._place_call(c, now)
-            elif c["status"] == "calling":
-                self._miss(c, now, "no result from the phone company")
-            elif c["status"] == "alerted":
-                self._alert_backup(c, now)
-        self._weekly_summaries(now)
+            try:
+                if c["status"] in ("scheduled", "waiting_retry"):
+                    self._place_call(c, now)
+                elif c["status"] == "calling":
+                    self._miss(c, now, "no result from the phone company")
+                elif c["status"] == "alerted":
+                    self._alert_backup(c, now)
+            except Exception as e:  # never let one person's problem block the others
+                self.log(c, c["kupuna_id"], "error", f"Problem handling today's check-in: {e}")
+        try:
+            self._weekly_summaries(now)
+        except Exception as e:
+            self.log(None, None, "error", f"Problem sending weekly summaries: {e}")
 
     def _start_due_mornings(self, now: datetime) -> None:
         local_now = self.local(now)
@@ -305,7 +326,14 @@ class Engine:
             self.log(c, k["id"], "skipped", "Quiet hours; not calling")
             return
         attempt = c["attempts"] + 1
-        sid = self.phone.place_checkin_call(k["phone"], c["id"])
+        try:
+            sid = self.phone.place_checkin_call(k["phone"], c["id"])
+        except Exception as e:
+            self.update(c["id"], status="calling", attempts=attempt, call_sid=None, last_call_at=iso(now), next_at=None)
+            self.log(c, k["id"], "call", f"Calling {k['name']} ({k['phone']}) · try {attempt} of {self.cfg.MAX_TRIES}")
+            self.log(c, k["id"], "error", f"Couldn't place the call to {k['name']} ({k['phone']}): {e}")
+            self._miss(self.checkin(c["id"]), now, "the call couldn't be placed")
+            return
         self.update(c["id"], status="calling", attempts=attempt, call_sid=sid, last_call_at=iso(now),
                     next_at=iso(now + timedelta(minutes=self.cfg.NO_RESULT_TIMEOUT_MIN)))
         self.log(c, k["id"], "call", f"Calling {k['name']} ({k['phone']}) · try {attempt} of {self.cfg.MAX_TRIES}")
@@ -335,10 +363,16 @@ class Engine:
                f"{self.fmt(deadline)}, we'll contact {k['contact2_name']}. This service does not call 911.")
         voice = (f"This is {self.cfg.SERVICE_NAME}. {n} did not answer {c['attempts']} check-in calls this morning. "
                  f"Please check on them, then reply OK to our text message.")
-        self.phone.send_sms(k["contact1_phone"], sms)
-        self.phone.alert_call(k["contact1_phone"], voice)
         self.update(c["id"], status="alerted", alerted_at=iso(now), next_at=iso(deadline))
-        self.log(c, k["id"], "alert", f"{c['attempts']} missed calls. Texted and called {k['contact1_name']}.")
+        texted = self._send("sms", k["contact1_phone"], sms, c, k["id"], k["contact1_name"])
+        called = self._send("alert", k["contact1_phone"], voice, c, k["id"], k["contact1_name"])
+        if not (texted or called):
+            # family can't be reached at all: go straight to the backup instead of waiting 15 minutes
+            self.log(c, k["id"], "alert", f"{c['attempts']} missed calls. Couldn't reach {k['contact1_name']}; contacting backup now.")
+            self._alert_backup(self.checkin(c["id"]), now)
+            return
+        self.log(c, k["id"], "alert", f"{c['attempts']} missed calls. "
+                 f"{'Texted and called' if texted and called else 'Texted' if texted else 'Called'} {k['contact1_name']}.")
 
     def _alert_backup(self, c: sqlite3.Row, now: datetime) -> None:
         k = self.kupuna(c["kupuna_id"])
@@ -348,9 +382,9 @@ class Engine:
                f"This service does not call 911.")
         voice = (f"This is {self.cfg.SERVICE_NAME}. {n} missed this morning's check-in calls and we could not reach "
                  f"{k['contact1_name']}. Please check on them, then reply OK to our text message.")
-        self.phone.send_sms(k["contact2_phone"], sms)
-        self.phone.alert_call(k["contact2_phone"], voice)
         self.update(c["id"], status="backup_alerted", backup_at=iso(now), next_at=None)
+        self._send("sms", k["contact2_phone"], sms, c, k["id"], k["contact2_name"])
+        self._send("alert", k["contact2_phone"], voice, c, k["id"], k["contact2_name"])
         self.log(c, k["id"], "alert",
                  f"No reply from {k['contact1_name']} in {self.cfg.FAMILY_REPLY_WINDOW_MIN} min. "
                  f"Texted and called backup {k['contact2_name']}.")
@@ -372,7 +406,8 @@ class Engine:
                 self.update(c["id"], status="safe", next_at=None, resolved_by="pressed 1 (late)", resolved_at=iso(now))
                 self.log(c, k["id"], "ok", f"{k['name']} pressed 1 after family was alerted. Marked safe.")
                 n = greetings.short_name(k["name"])
-                self.phone.send_sms(k["contact1_phone"], f"{self.cfg.SERVICE_NAME} update: {n} just pressed 1. They're checked in.")
+                self._send("sms", k["contact1_phone"], f"{self.cfg.SERVICE_NAME} update: {n} just pressed 1. They're checked in.",
+                           c, k["id"], k["contact1_name"])
             return "ok"
         if digit == "2":
             n = greetings.short_name(k["name"])
@@ -380,10 +415,10 @@ class Engine:
                    f"Please contact them now. Reply OK once you've reached them. If it's an emergency, call 911.")
             voice = (f"This is {self.cfg.SERVICE_NAME}. {n} asked for help on their check-in call. "
                      f"Please contact them right away, then reply OK to our text message.")
-            for who in ("contact1", "contact2"):
-                self.phone.send_sms(k[f"{who}_phone"], msg)
-                self.phone.alert_call(k[f"{who}_phone"], voice)
             self.update(c["id"], status="help", next_at=None, alerted_at=iso(now))
+            for who in ("contact1", "contact2"):
+                self._send("sms", k[f"{who}_phone"], msg, c, k["id"], k[f"{who}_name"])
+                self._send("alert", k[f"{who}_phone"], voice, c, k["id"], k[f"{who}_name"])
             self.log(c, k["id"], "alert", f"{k['name']} pressed 2 (asked for help). Texted and called both contacts.")
             return "help"
         return "unknown"
@@ -440,8 +475,7 @@ class Engine:
             if sent:
                 continue
             body = self.weekly_text(k, week_start, week_end)
-            if body:
-                self.phone.send_sms(k["contact1_phone"], body)
+            if body and self._send("sms", k["contact1_phone"], body, None, k["id"], k["contact1_name"]):
                 self.log(None, k["id"], "summary", f"Sent weekly summary to {k['contact1_name']}")
             self.db.execute("INSERT INTO summaries VALUES (?,?,?)", (k["id"], week_end.isoformat(), iso(now)))
 

@@ -204,7 +204,7 @@ def admin():
         f"<form class='inline' method='post' action='{url_for('admin_restore', kupuna_id=k['id'])}'>"
         f"<button>Restore</button></form></td></tr>" for k in removed) + "</table></div></section>") if removed else ""
     ev = "".join(f"<tr><td class='mono'>{escape(engine.local(db.parse(e['at'])).strftime('%a %-I:%M %p'))}</td>"
-                 f"<td>{escape(e['detail'])}</td></tr>" for e in events)
+                 f"<td{' class=err' if e['kind'] == 'error' else ''}>{escape(e['detail'])}</td></tr>" for e in events)
     flash = request.args.get("msg", "")
     html = (PAGE.replace("{today}", engine.local(now).strftime("%A, %B %-d"))
             .replace("{dry}", "<p class='dry'>Dry run: nothing is really being called or texted. Set DRY_RUN=0 to go live.</p>" if cfg.DRY_RUN else "")
@@ -335,13 +335,34 @@ def scheduler_loop(every_seconds: int = 20):
         time.sleep(every_seconds)
 
 
-def start_scheduler():
-    if os.environ.get("DISABLE_SCHEDULER") == "1":
-        return
-    threading.Thread(target=scheduler_loop, daemon=True, name="scheduler").start()
+# The process that serves requests owns the database connection and the scheduler.
+# Some hosts load the app once and then copy ("fork") it into a worker process. A database
+# connection must never be shared across that copy, so each process opens its own, and the
+# scheduler starts in the serving process (Render's health check reaches it within seconds).
+_db_pid = os.getpid()
+_scheduler_pid = None
 
 
-start_scheduler()
+def ensure_process_ready():
+    global _db_pid, _scheduler_pid
+    pid = os.getpid()
+    if _db_pid != pid:
+        with lock:
+            if _db_pid != pid:
+                engine.db = db.connect(cfg.DATABASE_PATH)
+                _db_pid = pid
+    if _scheduler_pid != pid and os.environ.get("DISABLE_SCHEDULER") != "1":
+        with lock:
+            if _scheduler_pid != pid:
+                threading.Thread(target=scheduler_loop, daemon=True, name="scheduler").start()
+                _scheduler_pid = pid
+
+
+@app.before_request
+def _ready():
+    ensure_process_ready()
+
 
 if __name__ == "__main__":
+    ensure_process_ready()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
