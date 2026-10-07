@@ -392,7 +392,9 @@ class Webhooks(unittest.TestCase):
         self.assertIn("/admin/edit/", self.client.get("/admin", headers=auth).get_data(as_text=True))
 
     def test_admin_needs_password(self):
-        self.assertEqual(self.client.get("/admin").status_code, 401)
+        r = self.client.get("/admin")
+        self.assertEqual(r.status_code, 302)
+        self.assertIn("/admin/login", r.headers["Location"])
         auth = {"Authorization": "Basic " + base64.b64encode(b"x:pw").decode()}
         r = self.client.get("/admin", headers=auth)
         self.assertEqual(r.status_code, 200)
@@ -407,7 +409,7 @@ if __name__ == "__main__":
 GOOD_SIGNUP = dict(plan="basic", family_name="Kainoa Kekona", family_phone="425-555-0110", family_email="kainoa@example.com",
                    relationship="Son", kupuna_name="Auntie Leilani", kupuna_phone="808-555-0142", call_time="08:30",
                    language="Pidgin", backup_name="Mele", backup_phone="808-555-0133", notes="Hard of hearing",
-                   agree_consent="on", agree_911="on")
+                   agree_consent="on", agree_sms="on", agree_911="on")
 
 
 class SignupFlow(unittest.TestCase):
@@ -528,7 +530,9 @@ class SignupFlow(unittest.TestCase):
             cfg.OFFER_TALK_STORY = old
 
     def test_review_page_needs_password(self):
-        self.assertEqual(self.client.get("/admin/signup/1").status_code, 401)
+        r = self.client.get("/admin/signup/1")
+        self.assertEqual(r.status_code, 302)
+        self.assertIn("/admin/login", r.headers["Location"])
 
 
 class Removing(unittest.TestCase):
@@ -697,3 +701,200 @@ class FailureHandling(unittest.TestCase):
     def test_database_waits_instead_of_failing_fast(self):
         conn = db.connect(":memory:")
         self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+
+
+class SignInPage(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import app as m
+        cls.m = m
+
+    def setUp(self):
+        self.m._login_tries.clear()
+        self.c = self.m.app.test_client()
+
+    def test_signed_out_visit_shows_password_form(self):
+        r = self.c.get("/admin", follow_redirects=True)
+        body = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('type="password"', body)
+        self.assertIn("Owner sign-in", body)
+
+    def test_right_password_signs_in_and_returns_to_page(self):
+        r = self.c.post("/admin/login", data={"password": "pw", "next": "/admin/edit/5"})
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(r.headers["Location"].endswith("/admin/edit/5"))
+        r = self.c.get("/admin")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Sign out", r.get_data(as_text=True))
+
+    def test_wrong_password(self):
+        r = self.c.post("/admin/login", data={"password": "nope"})
+        self.assertEqual(r.status_code, 401)
+        self.assertIn("isn&#x27;t right", r.get_data(as_text=True))
+        self.assertEqual(self.c.get("/admin").status_code, 302)
+
+    def test_next_cannot_send_you_to_another_site(self):
+        r = self.c.post("/admin/login", data={"password": "pw", "next": "https://evil.example/admin"})
+        self.assertTrue(r.headers["Location"].endswith("/admin"))
+        r = self.c.post("/admin/login", data={"password": "pw", "next": "//evil.example"})
+        self.assertTrue(r.headers["Location"].endswith("/admin"))
+
+    def test_sign_out(self):
+        self.c.post("/admin/login", data={"password": "pw"})
+        self.c.post("/admin/logout")
+        self.assertEqual(self.c.get("/admin").status_code, 302)
+
+    def test_too_many_wrong_tries_locks_for_a_while(self):
+        for _ in range(10):
+            self.c.post("/admin/login", data={"password": "nope"})
+        r = self.c.post("/admin/login", data={"password": "pw"})
+        self.assertIn("Too many tries", r.get_data(as_text=True))
+        self.assertEqual(self.c.get("/admin").status_code, 302)
+
+    def test_signed_out_post_does_nothing(self):
+        r = self.c.post("/admin/remove/1")
+        self.assertEqual(r.status_code, 401)
+
+
+class UndeliveredTexts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import app as m
+        cls.m = m
+
+    def setUp(self):
+        self.m.engine.db = db.connect(":memory:")
+        self.m.engine.phone = ph.DryRunPhone(quiet=True)
+        self.m.engine.clock = Clock(13, 0)
+        self.kid = self.m.engine.add_kupuna(
+            name="Auntie Leilani", phone="8085550142", call_time="09:00", language="Pidgin",
+            contact1_name="Kainoa", contact1_phone="8085550110", contact2_name="Mele",
+            contact2_phone="8085550133", consent_note="ok")
+        self.c = self.m.app.test_client()
+        self.c.post("/admin/login", data={"password": "pw"})
+
+    def errors(self):
+        return [r["detail"] for r in self.m.engine.db.execute("SELECT detail FROM events WHERE kind='error'")]
+
+    def test_blocked_family_text_is_named_and_explained(self):
+        r = self.c.post("/sms/status", data={"MessageStatus": "undelivered", "To": "+18085550110", "ErrorCode": "30034"})
+        self.assertEqual(r.status_code, 204)
+        self.assertEqual(len(self.errors()), 1)
+        self.assertIn("Kainoa (+18085550110)", self.errors()[0])
+        self.assertIn("business texting", self.errors()[0])
+
+    def test_delivered_texts_are_ignored(self):
+        self.c.post("/sms/status", data={"MessageStatus": "delivered", "To": "+18085550110"})
+        self.c.post("/sms/status", data={"MessageStatus": "sent", "To": "+18085550110"})
+        self.assertEqual(self.errors(), [])
+
+    def test_banner_shows_while_texts_are_blocked(self):
+        self.assertNotIn("Texts are being blocked", self.c.get("/admin").get_data(as_text=True))
+        self.c.post("/sms/status", data={"MessageStatus": "undelivered", "To": "+18083922341", "ErrorCode": "30034"})
+        self.assertIn("Texts are being blocked", self.c.get("/admin").get_data(as_text=True))
+        self.m.engine.clock.go(8 * 24 * 60)
+        self.assertNotIn("Texts are being blocked", self.c.get("/admin").get_data(as_text=True))
+
+    def test_owner_alert_failure_is_logged_not_swallowed(self):
+        self.m.engine.phone = PickyPhone(bad_sms={"+18085550999"})
+        self.m.engine.add_signup(plan="basic", family_name="Kainoa", family_phone="4255550110",
+                                 family_email="k@example.com", relationship="Son", kupuna_name="Auntie",
+                                 kupuna_phone="8085550150", call_time="09:00", language="English",
+                                 backup_name="Mele", backup_phone="8085550151", notes="")
+        self.assertTrue(any("sign-up alert" in e for e in self.errors()), self.errors())
+        self.assertEqual(self.m.engine.db.execute("SELECT COUNT(*) FROM signups").fetchone()[0], 1, "sign-up still saved")
+
+    def test_twilio_is_asked_to_report_back(self):
+        cfg = type("C", (), dict(TWILIO_ACCOUNT_SID="AC1", TWILIO_AUTH_TOKEN="t", TWILIO_FROM_NUMBER="+18085550000",
+                                 PUBLIC_BASE_URL="https://kupuna-checkin.onrender.com", RING_SECONDS=25))
+        tp = ph.TwilioPhone(cfg)
+        sent = {}
+        tp._post = lambda what, fields: sent.update(fields) or "SM1"
+        tp.send_sms("+18085550110", "hi")
+        self.assertEqual(sent["StatusCallback"], "https://kupuna-checkin.onrender.com/sms/status")
+
+    def test_status_callback_requires_twilio_signature_when_live(self):
+        cfg = self.m.cfg
+        old = (cfg.DRY_RUN, cfg.TWILIO_AUTH_TOKEN, cfg.PUBLIC_BASE_URL)
+        cfg.DRY_RUN, cfg.TWILIO_AUTH_TOKEN, cfg.PUBLIC_BASE_URL = False, "secret", "https://x.example"
+        try:
+            r = self.c.post("/sms/status", data={"MessageStatus": "undelivered", "To": "+18085550110", "ErrorCode": "30034"})
+            self.assertEqual(r.status_code, 403)
+            self.assertEqual(self.errors(), [])
+        finally:
+            cfg.DRY_RUN, cfg.TWILIO_AUTH_TOKEN, cfg.PUBLIC_BASE_URL = old
+
+
+class TextingCompliance(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import app as m
+        import signup
+        cls.m, cls.signup = m, signup
+
+    def setUp(self):
+        self.m.engine.db = db.connect(":memory:")
+        self.m.engine.phone = ph.DryRunPhone(quiet=True)
+        self.m.engine.clock = Clock(13, 0)
+        self.signup._recent.clear()
+        self.c = self.m.app.test_client()
+
+    def post(self, **over):
+        d = dict(GOOD_SIGNUP); d.update(over)
+        return self.c.post("/signup", data={k: v for k, v in d.items() if v is not None})
+
+    def test_texting_consent_box_is_required(self):
+        r = self.post(agree_sms=None)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.m.engine.db.execute("SELECT COUNT(*) FROM signups").fetchone()[0], 0)
+        body = self.c.get("/signup").get_data(as_text=True)
+        self.assertIn("Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help.", body)
+        self.assertIn('href="/privacy"', body)
+
+    def test_privacy_page(self):
+        r = self.c.get("/privacy")
+        body = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("No mobile information will be shared with third parties", body)
+        self.assertIn("808-555-0999", body)  # OWNER_PHONE in tests
+
+    def test_approval_sends_welcome_texts_to_both_contacts(self):
+        self.post()
+        sid = self.m.engine.db.execute("SELECT id FROM signups").fetchone()[0]
+        self.m.engine.phone.sent.clear()
+        self.m.engine.approve_signup(sid, name="Auntie Leilani", phone="8085550142", call_time="08:30",
+                                     language="Pidgin", contact1_name="Kainoa", contact1_phone="4255550110",
+                                     contact2_name="Mele", contact2_phone="8085550133", consent_note="phoned 10/7")
+        texts = {to: body for k, to, body in self.m.engine.phone.sent if k == "sms"}
+        self.assertIn("family contact for Auntie Leilani", texts["+14255550110"])
+        self.assertIn("backup contact", texts["+18085550133"])
+        for body in texts.values():
+            self.assertIn("Reply STOP to opt out, HELP for help", body)
+            self.assertTrue(body.startswith("Kupuna Check-In:"))
+
+    def test_adding_by_hand_also_sends_welcome(self):
+        self.c.post("/admin/login", data={"password": "pw"})
+        self.c.post("/admin/add", data=dict(name="Uncle Walter", phone="8085550177", call_time="09:00",
+                                             language="English", contact1_name="Dana", contact1_phone="8085550178",
+                                             contact2_name="Bobby", contact2_phone="8085550179", consent_note="ok"))
+        self.assertEqual(sorted(to for k, to, _ in self.m.engine.phone.sent if k == "sms"),
+                         ["+18085550178", "+18085550179"])
+
+    def test_help_and_stop_replies(self):
+        e = self.m.engine
+        help_reply = e.family_reply("+18085550110", "help")
+        self.assertIn("808-555-0999", help_reply)
+        self.assertIn("Reply STOP to opt out", help_reply)
+        self.assertEqual(e.family_reply("+18085550110", "STOP"), "", "Twilio answers STOP itself")
+        self.assertEqual(e.family_reply("+18085550110", "Start"), "")
+
+    def test_alert_and_weekly_texts_include_opt_out(self):
+        e, phone, clock, kid = make()
+        clock.go(1); e.tick()
+        for _ in range(2):
+            miss(e); clock.go(5); e.tick()
+        miss(e)
+        alert = next(b for k, to, b in phone.sent if k == "sms")
+        self.assertIn("Reply STOP to opt out.", alert)
+        self.assertIn("Reply STOP to opt out.", e.weekly_text(e.kupuna(kid), clock().date(), clock().date()))
