@@ -86,6 +86,18 @@ Every step shows in the activity list on `/admin` and in `python manage.py log`.
   number. Check twilio.com/en-us/pricing for current US rates. A normal morning is one
   short call per kūpuna; alerts add a few texts and calls.
 
+## Family sign-ups
+
+Your home page (`/`) is a public sign-up form. When a family signs up:
+
+1. You get a text (set `OWNER_PHONE`) and the sign-up appears under **New sign-ups** on `/admin`.
+2. Nobody is called yet. Click **Review**, call the kūpuna yourself, and get their OK.
+3. Write how and when they agreed in the consent box, then click **Approve and start calls**.
+
+To take payment, create a Stripe Payment Link for each plan and set `PAYMENT_LINK_BASIC` and
+`PAYMENT_LINK_TALK_STORY`. The thank-you page then shows a **Set up payment** button. Prices and
+the free-trial line on the page come from `PRICE_BASIC`, `PRICE_TALK_STORY` and `FREE_TRIAL_NOTE`.
+
 ## 4. Before you take money
 
 - **Written consent.** Automated calls fall under the federal robocall law (TCPA). Get
@@ -110,6 +122,7 @@ Every step shows in the activity list on `/admin` and in `python manage.py log`.
 | `phone.py` | Twilio calls and texts, call scripts, webhook signature check, dry-run phone |
 | `app.py` | Web app: Twilio webhooks, background scheduler, `/admin` status page |
 | `greetings.py` | What kūpuna hear, per language |
+| `signup.py` | Public sign-up page and the approve step on `/admin` |
 | `manage.py` | Command line: `demo`, `add`, `list`, `call-now`, `pause`, `resume`, `log` |
 | `config.py` | Settings from `.env` (timing rules, quiet hours, time zone) |
 | `tests/` | Automated tests, no Twilio needed |

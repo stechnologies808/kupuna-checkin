@@ -56,4 +56,12 @@ class Config:
     WEEKLY_SUMMARY_WEEKDAY = int(os.environ.get("WEEKLY_SUMMARY_WEEKDAY", 6))  # Monday=0 ... Sunday=6
     WEEKLY_SUMMARY_HOUR = int(os.environ.get("WEEKLY_SUMMARY_HOUR", 18))
 
+    # Sign-up page
+    OWNER_PHONE = os.environ.get("OWNER_PHONE", "")          # gets a text for each new sign-up
+    PAYMENT_LINK_BASIC = os.environ.get("PAYMENT_LINK_BASIC", "")          # Stripe Payment Link URLs
+    PAYMENT_LINK_TALK_STORY = os.environ.get("PAYMENT_LINK_TALK_STORY", "")
+    PRICE_BASIC = os.environ.get("PRICE_BASIC", "$12/month")
+    PRICE_TALK_STORY = os.environ.get("PRICE_TALK_STORY", "$39/month")
+    FREE_TRIAL_NOTE = os.environ.get("FREE_TRIAL_NOTE", "First month free while we're getting started.")
+
     RING_SECONDS = int(os.environ.get("RING_SECONDS", 25))

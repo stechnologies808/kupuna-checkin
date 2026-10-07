@@ -51,7 +51,7 @@ def cmd_add():
 
 def cmd_list():
     e = real_engine()
-    for k in e.db.execute("SELECT * FROM kupuna ORDER BY id"):
+    for k in e.db.execute("SELECT * FROM kupuna WHERE removed_at IS NULL ORDER BY id"):
         state = "active" if k["active"] else "PAUSED"
         print(f"{k['id']:>3}  {k['name']:<28} {k['phone']:<14} {k['call_time']}  {k['language']:<9} "
               f"family: {k['contact1_name']}  backup: {k['contact2_name']}  ({state})")

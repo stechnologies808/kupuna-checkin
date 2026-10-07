@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS kupuna (
     consent_note    TEXT NOT NULL,          -- who agreed, how, when
     consent_at      TEXT NOT NULL,
     active          INTEGER NOT NULL DEFAULT 1,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    removed_at      TEXT                    -- set when taken off the list; history is kept
 );
 
 CREATE TABLE IF NOT EXISTS checkins (
@@ -44,6 +45,26 @@ CREATE TABLE IF NOT EXISTS events (
     detail      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS signups (
+    id              INTEGER PRIMARY KEY,
+    created_at      TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'new',   -- new, approved, declined
+    plan            TEXT NOT NULL,
+    family_name     TEXT NOT NULL,
+    family_phone    TEXT NOT NULL,
+    family_email    TEXT NOT NULL,
+    relationship    TEXT NOT NULL,
+    kupuna_name     TEXT NOT NULL,
+    kupuna_phone    TEXT NOT NULL,
+    call_time       TEXT NOT NULL,
+    language        TEXT NOT NULL,
+    backup_name     TEXT NOT NULL,
+    backup_phone    TEXT NOT NULL,
+    notes           TEXT NOT NULL DEFAULT '',
+    kupuna_id       INTEGER REFERENCES kupuna(id),
+    decided_at      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS summaries (
     kupuna_id   INTEGER NOT NULL REFERENCES kupuna(id),
     week_ending TEXT NOT NULL,
@@ -59,7 +80,15 @@ def connect(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL") if path != ":memory:" else None
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an older database up to date without losing anything."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(kupuna)")}
+    if "removed_at" not in cols:
+        conn.execute("ALTER TABLE kupuna ADD COLUMN removed_at TEXT")
 
 
 def iso(dt: datetime) -> str:

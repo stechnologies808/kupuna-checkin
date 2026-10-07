@@ -16,6 +16,7 @@ from flask import Flask, Response, abort, redirect, request, url_for
 
 import db
 import phone as ph
+import signup
 from config import Config
 from engine import Engine
 
@@ -125,10 +126,12 @@ form.inline{display:inline}a.btn{display:inline-block;padding:4px 10px;border-ra
 </style></head><body><main>
 <header><h1>Kupuna Check-In</h1><p class="mu">{today} · updates every 30 seconds (paused while you fill in the form)</p></header>
 {dry}{flash}
+{signups}
 <section><h2>Today</h2><div class="box"><table><tr><th>Kūpuna</th><th>Call time</th><th>Status</th><th>Tries</th><th></th></tr>{rows}</table></div></section>
 <section><h2>Recent activity</h2><div class="box"><table><tr><th>Time</th><th>What happened</th></tr>{events}</table></div></section>
 <section><h2>Add a kūpuna</h2><div class="box"><form class="add" method="post" action="{add_url}">
 {add_fields}<div><button type="submit">Add to the list</button></div></form></div></section>
+{removed}
 </main><script>
 // Refresh every 30 s to show new activity, but never while someone is filling in the form.
 setInterval(function(){
@@ -166,7 +169,7 @@ def form_fields(values: dict, placeholders: bool = False) -> str:
 
 @app.get("/")
 def home():
-    return redirect(url_for("admin"))
+    return redirect(url_for("signup_form"))
 
 
 @app.get("/admin")
@@ -175,9 +178,11 @@ def admin():
     with lock:
         now = engine.clock()
         day = engine.local(now).date().isoformat()
-        kup = engine.db.execute("SELECT * FROM kupuna ORDER BY call_time, name").fetchall()
+        kup = engine.db.execute("SELECT * FROM kupuna WHERE removed_at IS NULL ORDER BY call_time, name").fetchall()
+        removed = engine.db.execute("SELECT * FROM kupuna WHERE removed_at IS NOT NULL ORDER BY name").fetchall()
         today = {r["kupuna_id"]: r for r in engine.db.execute("SELECT * FROM checkins WHERE day=?", (day,))}
         events = engine.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 60").fetchall()
+        signups_html = signup.pending_section(engine, url_for)
     rows = []
     for k in kup:
         c = today.get(k["id"])
@@ -191,12 +196,20 @@ def admin():
             f"<td class='mono'>{c['attempts'] if c else 0}</td><td>"
             f"<form class='inline' method='post' action='{url_for('admin_call_now', kupuna_id=k['id'])}'><button>Call now</button></form> "
             f"<form class='inline' method='post' action='{url_for('admin_toggle', kupuna_id=k['id'])}'><button>{toggle}</button></form> "
-            f"<a class='btn' href='{url_for('admin_edit', kupuna_id=k['id'])}'>Edit</a></td></tr>")
+            f"<a class='btn' href='{url_for('admin_edit', kupuna_id=k['id'])}'>Edit</a> "
+            f"<a class='btn' href='{url_for('admin_remove', kupuna_id=k['id'])}'>Remove</a></td></tr>")
+    removed_html = ("<section><h2>Removed</h2><div class='box'><table>" + "".join(
+        f"<tr><td>{escape(k['name'])} <span class='mu'>· removed "
+        f"{escape(engine.local(db.parse(k['removed_at'])).strftime('%b %-d'))}</span></td><td>"
+        f"<form class='inline' method='post' action='{url_for('admin_restore', kupuna_id=k['id'])}'>"
+        f"<button>Restore</button></form></td></tr>" for k in removed) + "</table></div></section>") if removed else ""
     ev = "".join(f"<tr><td class='mono'>{escape(engine.local(db.parse(e['at'])).strftime('%a %-I:%M %p'))}</td>"
                  f"<td>{escape(e['detail'])}</td></tr>" for e in events)
     flash = request.args.get("msg", "")
     html = (PAGE.replace("{today}", engine.local(now).strftime("%A, %B %-d"))
             .replace("{dry}", "<p class='dry'>Dry run: nothing is really being called or texted. Set DRY_RUN=0 to go live.</p>" if cfg.DRY_RUN else "")
+            .replace("{signups}", signups_html)
+            .replace("{removed}", removed_html)
             .replace("{flash}", f"<p class='err'>{escape(flash)}</p>" if flash else "")
             .replace("{rows}", "".join(rows) or "<tr><td colspan='5' class='mu'>No kūpuna yet. Add one below.</td></tr>")
             .replace("{events}", ev or "<tr><td colspan='2' class='mu'>Nothing yet.</td></tr>")
@@ -259,6 +272,40 @@ def admin_call_now(kupuna_id):
     return redirect(url_for("admin"))
 
 
+@app.get("/admin/remove/<int:kupuna_id>")
+@admin_only
+def admin_remove(kupuna_id):
+    with lock:
+        k = engine.kupuna(kupuna_id)
+    if not k or k["removed_at"]:
+        return redirect(url_for("admin"))
+    head = PAGE[:PAGE.index("<header>")]
+    return (head + f"<header><h1>Remove {escape(k['name'])}?</h1></header>"
+            "<section class='box' style='padding:14px'><p>Their calls and alerts stop right away, including any "
+            "retries already happening today, and they leave the list.</p>"
+            "<p class='mu'>Their call history and consent record are kept. You can restore them later "
+            "from the Removed list at the bottom of the page.</p></section>"
+            f"<div><form class='inline' method='post' action='{url_for('admin_remove_confirm', kupuna_id=kupuna_id)}'>"
+            f"<button>Yes, remove {escape(k['name'])}</button></form> "
+            f"<a class='btn' href='{url_for('admin')}'>Cancel</a></div></main></body></html>")
+
+
+@app.post("/admin/remove/<int:kupuna_id>")
+@admin_only
+def admin_remove_confirm(kupuna_id):
+    with lock:
+        engine.remove_kupuna(kupuna_id)
+    return redirect(url_for("admin"))
+
+
+@app.post("/admin/restore/<int:kupuna_id>")
+@admin_only
+def admin_restore(kupuna_id):
+    with lock:
+        engine.restore_kupuna(kupuna_id)
+    return redirect(url_for("admin"))
+
+
 @app.post("/admin/toggle/<int:kupuna_id>")
 @admin_only
 def admin_toggle(kupuna_id):
@@ -267,6 +314,9 @@ def admin_toggle(kupuna_id):
         if k:
             engine.set_active(kupuna_id, not k["active"])
     return redirect(url_for("admin"))
+
+
+signup.register(app, engine, lock, admin_only, PAGE[:PAGE.index("<header>")])
 
 
 @app.get("/health")

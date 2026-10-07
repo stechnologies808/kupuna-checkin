@@ -148,6 +148,73 @@ class Engine:
                   "contact2_name": "backup contact", "contact2_phone": "backup phone", "consent_note": "consent note"}
         self.log(None, kupuna_id, "signup", f"Updated {f['name']}: {', '.join(labels[k] for k in changed)}")
 
+    # ---------- public sign-ups (need the owner's approval before any calls) ----------
+    PLANS = {"basic": "Daily Check-In", "talk_story": "Talk Story"}
+    SIGNUP_FIELDS = ("plan", "family_name", "family_phone", "family_email", "relationship", "kupuna_name",
+                     "kupuna_phone", "call_time", "language", "backup_name", "backup_phone", "notes")
+
+    def add_signup(self, **fields) -> int:
+        f = {k: (fields.get(k) or "").strip() for k in self.SIGNUP_FIELDS}
+        missing = [label for k, label in (
+            ("family_name", "your name"), ("family_phone", "your phone"), ("family_email", "your email"),
+            ("kupuna_name", "your kūpuna's name"), ("kupuna_phone", "their phone"),
+            ("backup_name", "a backup contact's name"), ("backup_phone", "the backup contact's phone"))
+            if not f[k]]
+        if missing:
+            raise ValueError("Please add " + ", ".join(missing) + ".")
+        if f["plan"] not in self.PLANS:
+            raise ValueError("Please choose a plan.")
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", f["family_email"]):
+            raise ValueError("That email address doesn't look right.")
+        if len(f["notes"]) > 1000 or any(len(f[k]) > 120 for k in self.SIGNUP_FIELDS if k != "notes"):
+            raise ValueError("One of the answers is too long.")
+        for k in ("family_phone", "kupuna_phone", "backup_phone"):
+            f[k] = normalize_phone(f[k])
+        if f["kupuna_phone"] in (f["family_phone"], f["backup_phone"]):
+            raise ValueError("Your kūpuna's phone needs to be different from the contact phones.")
+        if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", f["call_time"]):
+            raise ValueError("Please pick a call time.")
+        hour = int(f["call_time"].split(":")[0])
+        if hour < self.cfg.QUIET_BEFORE_HOUR or hour >= self.cfg.QUIET_AFTER_HOUR:
+            raise ValueError(f"Please pick a call time between {self.cfg.QUIET_BEFORE_HOUR} AM and "
+                             f"{self.cfg.QUIET_AFTER_HOUR - 12} PM.")
+        if f["language"] not in greetings.GREETING:
+            f["language"] = "English"
+        cur = self.db.execute(
+            f"INSERT INTO signups (created_at, {', '.join(self.SIGNUP_FIELDS)}) "
+            f"VALUES ({', '.join('?' * (len(self.SIGNUP_FIELDS) + 1))})",
+            (iso(self.clock()), *(f[k] for k in self.SIGNUP_FIELDS)),
+        )
+        self.log(None, None, "signup", f"New sign-up: {f['family_name']} for {f['kupuna_name']} ({self.PLANS[f['plan']]})")
+        if self.cfg.OWNER_PHONE:
+            try:
+                self.phone.send_sms(normalize_phone(self.cfg.OWNER_PHONE),
+                                    f"{self.cfg.SERVICE_NAME}: new sign-up from {f['family_name']} "
+                                    f"({f['family_phone']}) for {f['kupuna_name']}, {self.PLANS[f['plan']]} plan. "
+                                    f"Review it on /admin.")
+            except Exception:  # the sign-up is saved either way; a failed text shouldn't lose it
+                pass
+        return cur.lastrowid
+
+    def signup(self, signup_id: int) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM signups WHERE id=?", (signup_id,)).fetchone()
+
+    def approve_signup(self, signup_id: int, **kupuna_fields) -> int:
+        s = self.signup(signup_id)
+        if not s or s["status"] != "new":
+            raise ValueError("That sign-up was already handled.")
+        kid = self.add_kupuna(**kupuna_fields)
+        self.db.execute("UPDATE signups SET status='approved', kupuna_id=?, decided_at=? WHERE id=?",
+                        (kid, iso(self.clock()), signup_id))
+        return kid
+
+    def decline_signup(self, signup_id: int) -> None:
+        s = self.signup(signup_id)
+        if s and s["status"] == "new":
+            self.db.execute("UPDATE signups SET status='declined', decided_at=? WHERE id=?",
+                            (iso(self.clock()), signup_id))
+            self.log(None, None, "signup", f"Declined sign-up from {s['family_name']} for {s['kupuna_name']}")
+
     def call_now(self, kupuna_id: int) -> int:
         """Start (or restart) today's check-in right away. For testing with your own phone."""
         k = self.kupuna(kupuna_id)
@@ -166,6 +233,26 @@ class Engine:
         self.log(self.checkin(cid), kupuna_id, "manual", f"Started a check-in for {k['name']} by hand")
         self._place_call(self.checkin(cid), now, force=True)
         return cid
+
+    def remove_kupuna(self, kupuna_id: int) -> None:
+        """Take someone off the list: no more calls or alerts, history kept."""
+        k = self.kupuna(kupuna_id)
+        if not k or k["removed_at"]:
+            return
+        now = iso(self.clock())
+        self.db.execute("UPDATE kupuna SET active=0, removed_at=? WHERE id=?", (now, kupuna_id))
+        # stop anything still in progress today (retries, family alerts, backup alerts)
+        self.db.execute(
+            "UPDATE checkins SET next_at=NULL, status=CASE WHEN status IN ('scheduled','calling','waiting_retry') "
+            "THEN 'skipped' ELSE status END WHERE kupuna_id=? AND next_at IS NOT NULL", (kupuna_id,))
+        self.log(None, kupuna_id, "signup", f"Removed {k['name']} from the list")
+
+    def restore_kupuna(self, kupuna_id: int) -> None:
+        k = self.kupuna(kupuna_id)
+        if not k or not k["removed_at"]:
+            return
+        self.db.execute("UPDATE kupuna SET active=1, removed_at=NULL WHERE id=?", (kupuna_id,))
+        self.log(None, kupuna_id, "signup", f"Restored {k['name']} to the list")
 
     def set_active(self, kupuna_id: int, active: bool) -> None:
         self.db.execute("UPDATE kupuna SET active=? WHERE id=?", (1 if active else 0, kupuna_id))
