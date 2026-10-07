@@ -68,7 +68,8 @@ class TwilioPhone:
         })
 
     def send_sms(self, to: str, body: str) -> str:
-        return self._post("Messages", {"To": to, "From": self.cfg.TWILIO_FROM_NUMBER, "Body": body})
+        return self._post("Messages", {"To": to, "From": self.cfg.TWILIO_FROM_NUMBER, "Body": body,
+                                       "StatusCallback": f"{self.cfg.PUBLIC_BASE_URL}/sms/status"})
 
 
 class DryRunPhone:

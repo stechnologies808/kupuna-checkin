@@ -6,13 +6,17 @@ Run in production with ONE worker (the scheduler lives in this process):
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import threading
 import time
+from collections import defaultdict, deque
+from datetime import timedelta
 from functools import wraps
 from html import escape
 
-from flask import Flask, Response, abort, redirect, request, url_for
+from flask import Flask, Response, abort, redirect, request, session, url_for
 
 import db
 import phone as ph
@@ -21,6 +25,12 @@ from config import Config
 from engine import Engine
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+# Sessions are signed with a key derived from ADMIN_PASSWORD, so changing the password signs everyone out.
+app.secret_key = os.environ.get("SECRET_KEY") or hashlib.sha256(
+    ("kupuna-session:" + os.environ.get("ADMIN_PASSWORD", "")).encode()).hexdigest()
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  SESSION_COOKIE_SECURE=os.environ.get("PUBLIC_BASE_URL", os.environ.get("RENDER_EXTERNAL_URL", "")).startswith("https://"),
+                  PERMANENT_SESSION_LIFETIME=timedelta(days=30))
 cfg = Config
 lock = threading.RLock()  # one SQLite connection, used by the web threads and the scheduler in turn
 engine = Engine(db.connect(cfg.DATABASE_PATH), ph.make_phone(cfg), cfg)
@@ -43,14 +53,21 @@ def from_twilio(view):
     return wrapper
 
 
+def _password_ok(given: str) -> bool:
+    return bool(cfg.ADMIN_PASSWORD) and hmac.compare_digest(given.encode(), cfg.ADMIN_PASSWORD.encode())
+
+
 def admin_only(view):
     @wraps(view)
     def wrapper(*a, **kw):
         if not cfg.ADMIN_PASSWORD:
-            return Response("Set ADMIN_PASSWORD in .env to use this page.", 403)
-        auth = request.authorization
-        if not auth or auth.password != cfg.ADMIN_PASSWORD:
-            return Response("Sign in", 401, {"WWW-Authenticate": 'Basic realm="Kupuna Check-In"'})
+            return Response("Set ADMIN_PASSWORD in Render's Environment settings to use this page.", 403)
+        auth = request.authorization  # still accepted, for scripts
+        signed_in = session.get("admin") is True or bool(auth and _password_ok(auth.password or ""))
+        if not signed_in:
+            if request.method == "GET":
+                return redirect(url_for("admin_login", next=request.full_path.rstrip("?")))
+            return Response("Your sign-in expired. Go back, reload the page and sign in again.", 401)
         if request.method == "POST":  # block forms posted from other sites
             origin = request.headers.get("Origin")
             if origin and origin.rstrip("/") != request.host_url.rstrip("/") and origin.rstrip("/") != cfg.PUBLIC_BASE_URL:
@@ -98,6 +115,16 @@ def sms_in():
     return xml(ph.twiml_sms_reply(reply))
 
 
+@app.post("/sms/status")
+@from_twilio
+def sms_status():
+    status = request.form.get("MessageStatus", "")
+    if status in ("undelivered", "failed"):
+        with lock:
+            engine.text_not_delivered(request.form.get("To", ""), status, request.form.get("ErrorCode", ""))
+    return ("", 204)
+
+
 # ---------- status page ----------
 STATUS_LABEL = {
     "scheduled": ("Starting", "warn"), "calling": ("Calling", "warn"), "waiting_retry": ("Will retry", "warn"),
@@ -124,8 +151,8 @@ form.inline{display:inline}a.btn{display:inline-block;padding:4px 10px;border-ra
 .add label{display:grid;gap:3px;font-size:13px;font-weight:600}.add input,.add select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 .err{color:var(--bad);font-weight:600}.mu{color:var(--mu)}
 </style></head><body><main>
-<header><h1>Kupuna Check-In</h1><p class="mu">{today} · updates every 30 seconds (paused while you fill in the form)</p></header>
-{dry}{flash}
+<header style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap"><div><h1>Kupuna Check-In</h1><p class="mu">{today} · updates every 30 seconds (paused while you fill in the form)</p></div><form method="post" action="/admin/logout"><button>Sign out</button></form></header>
+{dry}{blocked}{flash}
 {signups}
 <section><h2>Today</h2><div class="box"><table><tr><th>Kūpuna</th><th>Call time</th><th>Status</th><th>Tries</th><th></th></tr>{rows}</table></div></section>
 <section><h2>Recent activity</h2><div class="box"><table><tr><th>Time</th><th>What happened</th></tr>{events}</table></div></section>
@@ -167,6 +194,60 @@ def form_fields(values: dict, placeholders: bool = False) -> str:
     return "\n".join(out)
 
 
+_login_tries: dict[str, deque] = defaultdict(deque)
+LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Kupuna Check-In · Sign in</title><style>
+:root{--bg:#F1F4F2;--s:#fff;--line:#D3DCD8;--fg:#17221F;--mu:#5A6964;--ac:#B3322B;--acink:#fff;--bad:#B3322B;--badb:#F8DEDB}
+@media (prefers-color-scheme:dark){:root{--bg:#111816;--s:#18211E;--line:#2C3934;--fg:#E7EEEB;--mu:#9AABA5;--ac:#F07A6F;--acink:#1A0E0C;--bad:#F48A80;--badb:#3F1C19;color-scheme:dark}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;padding:48px 16px}
+main{max-width:380px;margin:auto;display:grid;gap:16px}h1{margin:0;font-size:24px}
+form{background:var(--s);border:1px solid var(--line);border-radius:12px;padding:20px;display:grid;gap:14px}
+label{display:grid;gap:6px;font-weight:600;font-size:14px}
+input{font:inherit;padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);width:100%}
+button{font:inherit;font-weight:700;background:var(--ac);color:var(--acink);border:0;border-radius:8px;padding:12px;cursor:pointer}
+:focus-visible{outline:3px solid var(--ac);outline-offset:2px}.mu{color:var(--mu);font-size:14px;margin:0}
+.err{background:var(--badb);color:var(--bad);padding:10px 12px;border-radius:8px;font-weight:600;margin:0}
+</style></head><body><main><h1>Kupuna Check-In</h1><p class="mu">Owner sign-in</p>{err}
+<form method="post"><input type="hidden" name="next" value="{next}">
+<label for="password">Password<input id="password" name="password" type="password" autocomplete="current-password" autofocus required></label>
+<button type="submit">Sign in</button></form>
+<p class="mu">Stays signed in on this device for 30 days.</p></main></body></html>"""
+
+
+def _safe_next(n: str) -> str:
+    return n if n.startswith("/admin") and not n.startswith("//") else url_for("admin")
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    nxt = _safe_next(request.values.get("next", ""))
+    err = ""
+    if request.method == "POST":
+        ip = (request.headers.get("X-Forwarded-For", request.remote_addr or "") or "").split(",")[0].strip()
+        q, now = _login_tries[ip], time.time()
+        while q and now - q[0] > 900:
+            q.popleft()
+        if len(q) >= 10:
+            err = "Too many tries. Wait 15 minutes and try again."
+        elif _password_ok(request.form.get("password", "")):
+            q.clear()
+            session.clear()
+            session["admin"] = True
+            session.permanent = True
+            return redirect(nxt)
+        else:
+            q.append(now)
+            err = "That password isn't right. It's the ADMIN_PASSWORD you set in Render."
+    page = LOGIN_PAGE.replace("{next}", escape(nxt)).replace("{err}", f"<p class='err'>{escape(err)}</p>" if err else "")
+    return page, (401 if err else 200)
+
+
+@app.post("/admin/logout")
+def admin_logout():
+    session.clear()
+    return redirect(url_for("admin_login"))
+
+
 @app.get("/")
 def home():
     return redirect(url_for("signup_form"))
@@ -183,6 +264,7 @@ def admin():
         today = {r["kupuna_id"]: r for r in engine.db.execute("SELECT * FROM checkins WHERE day=?", (day,))}
         events = engine.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 60").fetchall()
         signups_html = signup.pending_section(engine, url_for)
+        blocked = engine.texting_blocked_recently()
     rows = []
     for k in kup:
         c = today.get(k["id"])
@@ -208,6 +290,10 @@ def admin():
     flash = request.args.get("msg", "")
     html = (PAGE.replace("{today}", engine.local(now).strftime("%A, %B %-d"))
             .replace("{dry}", "<p class='dry'>Dry run: nothing is really being called or texted. Set DRY_RUN=0 to go live.</p>" if cfg.DRY_RUN else "")
+            .replace("{blocked}", "<p class='dry'>Texts are being blocked by phone carriers: your Twilio number isn't "
+                     "registered for business texting (A2P 10DLC) yet. Families still get the alert phone calls, and new "
+                     "sign-ups still show here, but texts won't arrive until the registration is approved.</p>"
+                     if blocked else "")
             .replace("{signups}", signups_html)
             .replace("{removed}", removed_html)
             .replace("{flash}", f"<p class='err'>{escape(flash)}</p>" if flash else "")
@@ -224,9 +310,10 @@ def admin_add():
     f = request.form
     try:
         with lock:
-            engine.add_kupuna(**{k: f.get(k, "") for k in (
+            kid = engine.add_kupuna(**{k: f.get(k, "") for k in (
                 "name", "phone", "call_time", "language", "contact1_name", "contact1_phone",
                 "contact2_name", "contact2_phone", "consent_note")})
+            engine.send_welcome(kid)
     except ValueError as e:
         return redirect(url_for("admin", msg=str(e)))
     return redirect(url_for("admin"))
@@ -239,7 +326,7 @@ def admin_edit(kupuna_id):
         k = engine.kupuna(kupuna_id)
     if not k:
         return redirect(url_for("admin", msg="That person isn't on the list."))
-    head = PAGE[:PAGE.index("<header>")]
+    head = PAGE[:PAGE.index("<header")]
     flash = request.args.get("msg", "")
     return (head + f"<header><h1>Edit {escape(k['name'])}</h1>"
             f"<p class='mu'><a href='{url_for('admin')}'>Back to today</a></p></header>"
@@ -279,7 +366,7 @@ def admin_remove(kupuna_id):
         k = engine.kupuna(kupuna_id)
     if not k or k["removed_at"]:
         return redirect(url_for("admin"))
-    head = PAGE[:PAGE.index("<header>")]
+    head = PAGE[:PAGE.index("<header")]
     return (head + f"<header><h1>Remove {escape(k['name'])}?</h1></header>"
             "<section class='box' style='padding:14px'><p>Their calls and alerts stop right away, including any "
             "retries already happening today, and they leave the list.</p>"
@@ -316,7 +403,7 @@ def admin_toggle(kupuna_id):
     return redirect(url_for("admin"))
 
 
-signup.register(app, engine, lock, admin_only, PAGE[:PAGE.index("<header>")])
+signup.register(app, engine, lock, admin_only, PAGE[:PAGE.index("<header")])
 
 
 @app.get("/health")

@@ -73,6 +73,8 @@ button,.btn{font:inherit;font-weight:700;background:var(--ac);color:var(--acink)
 .note{background:var(--okb);color:var(--ok);padding:12px 14px;border-radius:10px;font-weight:700}
 .trap{position:absolute;left:-9999px}
 .small{font-size:14px;color:var(--mu)}
+a{color:var(--ac)}
+.policy{display:grid;gap:14px;max-width:68ch}.policy h2{margin-top:10px}
 @media (max-width:640px){.steps,.plans,fieldset{grid-template-columns:1fr}}
 </style></head><body><main>"""
 
@@ -141,10 +143,12 @@ def signup_page(cfg, form=None, error=""):
   <label class="trap" aria-hidden="true">Leave this empty<input name="website" tabindex="-1" autocomplete="off"></label>
   <label class="check"><input type="checkbox" id="agree_consent" name="agree_consent" {'checked' if form.get('agree_consent') else ''}>
     I understand you'll call my kūpuna to introduce yourselves and get their OK before daily calls begin.</label>
+  <label class="check"><input type="checkbox" id="agree_sms" name="agree_sms" {'checked' if form.get('agree_sms') else ''}>
+    <span>I agree to receive check-in alert texts from Kupuna Check-In at the phone numbers above. Message frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. See our <a href="{url_for('privacy')}">privacy policy</a>.</span></label>
   <label class="check"><input type="checkbox" id="agree_911" name="agree_911" {'checked' if form.get('agree_911') else ''}>
     I understand this service texts and calls family. It does not call 911 and is not a medical alert system.</label>
   <button type="submit">Sign up</button>
-  <p class="small">We use these phone numbers only for check-in calls and alerts. Reply STOP to any text to stop texts.</p>
+  <p class="small">We use these phone numbers only for check-in calls and alerts, and never sell or share them. <a href="{url_for('privacy')}">Privacy policy</a></p>
 </form>
 </main></body></html>""")
 
@@ -162,11 +166,47 @@ def thanks_page(cfg, s):
   <li><h3>Calls begin</h3><span class="mu">Every day at the time you picked.</span></li>
 </ol>
 {pay}
-<p class="small">Questions? Reply to the text we send you.</p>
+<p class="small">Questions? Reply to the text we send you. <a href="{url_for('privacy')}">Privacy policy</a></p>
+</main></body></html>""")
+
+
+def privacy_page(cfg, contact: str):
+    reach = f"Text or call {escape(contact)}." if contact else "Reply to any text we send you."
+    return (PUBLIC_HEAD.replace("{title}", "Kupuna Check-In · Privacy") + f"""
+<section class="hero"><span class="eyebrow">Kupuna Check-In</span><h1>Privacy policy</h1>
+<p class="mu">Last updated October 7, 2026</p></section>
+<section class="policy">
+<h2>What we collect</h2>
+<p>When you sign up, we collect your name, mobile number, email and relationship to your kūpuna; your kūpuna's name,
+phone number, preferred call time and language; your backup contact's name and phone number; and any notes you add.
+While the service runs, we keep a log of check-in calls, keypresses, alerts and replies.</p>
+<h2>How we use it</h2>
+<p>Only to provide the check-in service: to place the daily call, to text and call you and your backup contact when your
+kūpuna misses a call or asks for help, to send a weekly summary, and to contact you about your account.</p>
+<h2>Text messages</h2>
+<p>You receive check-in alert texts only if you agreed to them when signing up. Message frequency varies with how often
+your kūpuna misses a call; most weeks it is one summary text. Msg &amp; data rates may apply. Reply STOP to any text to
+opt out, or HELP for help.</p>
+<p><b>No mobile information will be shared with third parties or affiliates for marketing or promotional purposes.
+Text messaging opt-in data and consent are not shared with any third parties.</b></p>
+<h2>Who else handles your information</h2>
+<p>We use Twilio to place calls and send texts, and Render to host this website and its database. They handle your
+information only to provide those services to us. We never sell your information.</p>
+<h2>How long we keep it</h2>
+<p>We keep your information while you use the service. If you stop, ask us and we will delete your information, except
+the call log and consent record, which we keep for up to one year in case questions come up later.</p>
+<h2>Questions or deletion requests</h2>
+<p>{reach}</p>
+<p><a href="{url_for('signup_form')}">Back to sign up</a></p>
+</section>
 </main></body></html>""")
 
 
 def register(app, engine, lock, admin_only, admin_head):
+    @app.get("/privacy")
+    def privacy():
+        return privacy_page(engine.cfg, engine.owner_phone_pretty())
+
     @app.get("/signup")
     def signup_form():
         return signup_page(engine.cfg)
@@ -179,8 +219,8 @@ def register(app, engine, lock, admin_only, admin_head):
         ip = (request.headers.get("X-Forwarded-For", request.remote_addr or "") or "").split(",")[0].strip()
         if _too_many(ip):
             return signup_page(engine.cfg, f, "Too many sign-ups from this connection. Please try again in an hour."), 429
-        if not (f.get("agree_consent") and f.get("agree_911")):
-            return signup_page(engine.cfg, f, "Please tick both boxes at the bottom to continue."), 400
+        if not (f.get("agree_consent") and f.get("agree_sms") and f.get("agree_911")):
+            return signup_page(engine.cfg, f, "Please tick all three boxes at the bottom to continue."), 400
         try:
             with lock:
                 sid = engine.add_signup(**{k: f.get(k, "") for k in engine.SIGNUP_FIELDS})

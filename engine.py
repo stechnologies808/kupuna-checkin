@@ -205,13 +205,43 @@ class Engine:
         self.log(None, None, "signup", f"New sign-up: {f['family_name']} for {f['kupuna_name']} ({self.PLANS[f['plan']]})")
         if self.cfg.OWNER_PHONE:
             try:
-                self.phone.send_sms(normalize_phone(self.cfg.OWNER_PHONE),
-                                    f"{self.cfg.SERVICE_NAME}: new sign-up from {f['family_name']} "
-                                    f"({f['family_phone']}) for {f['kupuna_name']}, {self.PLANS[f['plan']]} plan. "
-                                    f"Review it on /admin.")
-            except Exception:  # the sign-up is saved either way; a failed text shouldn't lose it
-                pass
+                owner = normalize_phone(self.cfg.OWNER_PHONE)
+            except ValueError as e:
+                self.log(None, None, "error", f"OWNER_PHONE setting isn't a valid number: {e}")
+            else:  # the sign-up is saved either way; a failed text is logged, not fatal
+                self._send("sms", owner,
+                           f"{self.cfg.SERVICE_NAME}: new sign-up from {f['family_name']} "
+                           f"({f['family_phone']}) for {f['kupuna_name']}, {self.PLANS[f['plan']]} plan. "
+                           f"Review it on /admin.", None, None, "you (sign-up alert)")
         return cur.lastrowid
+
+    def owner_phone_pretty(self) -> str:
+        try:
+            d = normalize_phone(self.cfg.OWNER_PHONE)[2:]
+            return f"{d[:3]}-{d[3:6]}-{d[6:]}"
+        except (ValueError, TypeError):
+            return ""
+
+    def help_text(self) -> str:
+        contact = f" Questions? Text or call {self.owner_phone_pretty()}." if self.owner_phone_pretty() else ""
+        return (f"{self.cfg.SERVICE_NAME}: daily check-in alerts for your kupuna.{contact} "
+                f"Msg & data rates may apply. Reply STOP to opt out.")
+
+    def send_welcome(self, kupuna_id: int) -> None:
+        """First text to each contact once someone is added: who we are, what to expect, how to stop."""
+        k = self.kupuna(kupuna_id)
+        n = greetings.short_name(k["name"])
+        tail = "Msg & data rates may apply. Reply STOP to opt out, HELP for help."
+        self._send("sms", k["contact1_phone"],
+                   f"{self.cfg.SERVICE_NAME}: You're signed up as the family contact for {n}'s daily check-in calls. "
+                   f"We'll text you only if {n} misses the morning call, plus a weekly summary. {tail}",
+                   None, kupuna_id, k["contact1_name"])
+        self._send("sms", k["contact2_phone"],
+                   f"{self.cfg.SERVICE_NAME}: {k['contact1_name']} listed you as the backup contact for {n}'s daily "
+                   f"check-in calls. We'll text you only if {n} misses the morning call and we can't reach "
+                   f"{k['contact1_name']}. {tail}",
+                   None, kupuna_id, k["contact2_name"])
+        self.log(None, kupuna_id, "signup", f"Sent welcome texts to {k['contact1_name']} and {k['contact2_name']}")
 
     def signup(self, signup_id: int) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM signups WHERE id=?", (signup_id,)).fetchone()
@@ -223,6 +253,7 @@ class Engine:
         kid = self.add_kupuna(**kupuna_fields)
         self.db.execute("UPDATE signups SET status='approved', kupuna_id=?, decided_at=? WHERE id=?",
                         (kid, iso(self.clock()), signup_id))
+        self.send_welcome(kid)
         return kid
 
     def decline_signup(self, signup_id: int) -> None:
@@ -360,7 +391,7 @@ class Engine:
         deadline = now + timedelta(minutes=self.cfg.FAMILY_REPLY_WINDOW_MIN)
         sms = (f"{self.cfg.SERVICE_NAME}: {n} didn't answer this morning's calls at {self._call_times(c)}. "
                f"Please check on them. Reply OK once you've reached them. If we don't hear back by "
-               f"{self.fmt(deadline)}, we'll contact {k['contact2_name']}. This service does not call 911.")
+               f"{self.fmt(deadline)}, we'll contact {k['contact2_name']}. This service does not call 911. Reply STOP to opt out.")
         voice = (f"This is {self.cfg.SERVICE_NAME}. {n} did not answer {c['attempts']} check-in calls this morning. "
                  f"Please check on them, then reply OK to our text message.")
         self.update(c["id"], status="alerted", alerted_at=iso(now), next_at=iso(deadline))
@@ -379,7 +410,7 @@ class Engine:
         n = greetings.short_name(k["name"])
         sms = (f"{self.cfg.SERVICE_NAME}: {n} didn't answer this morning's check-in calls and we couldn't reach "
                f"{k['contact1_name']}. Please check on them if you can. Reply OK once you've reached them. "
-               f"This service does not call 911.")
+               f"This service does not call 911. Reply STOP to opt out.")
         voice = (f"This is {self.cfg.SERVICE_NAME}. {n} missed this morning's check-in calls and we could not reach "
                  f"{k['contact1_name']}. Please check on them, then reply OK to our text message.")
         self.update(c["id"], status="backup_alerted", backup_at=iso(now), next_at=None)
@@ -432,6 +463,47 @@ class Engine:
                    "canceled": "call canceled", "completed": "answered but no key pressed (maybe voicemail)"}
         self._miss(c, self.clock(), reasons.get(call_status, call_status))
 
+    UNDELIVERED_HINTS = {
+        "30034": "your Twilio number isn't registered for business texting (A2P 10DLC) yet",
+        "30032": "the Twilio number is a toll-free number that isn't verified yet",
+        "30003": "the phone is off or out of service",
+        "30005": "that number doesn't exist or isn't a mobile phone",
+        "30006": "that number is a landline and can't receive texts",
+        "30007": "the carrier filtered it as spam",
+        "21610": "that person replied STOP to our texts earlier",
+    }
+
+    def text_not_delivered(self, to: str, status: str, error_code: str) -> None:
+        """Twilio says a text we sent earlier failed or wasn't delivered."""
+        try:
+            to = normalize_phone(to)
+        except ValueError:
+            pass
+        row = self.db.execute(
+            """SELECT id, name, contact1_phone, contact1_name, contact2_phone, contact2_name FROM kupuna
+               WHERE contact1_phone=? OR contact2_phone=? ORDER BY removed_at IS NOT NULL, id DESC LIMIT 1""",
+            (to, to)).fetchone()
+        who = to
+        kid = None
+        if row:
+            kid = row["id"]
+            who = f"{row['contact1_name'] if row['contact1_phone'] == to else row['contact2_name']} ({to})"
+        elif self.cfg.OWNER_PHONE:
+            try:
+                if normalize_phone(self.cfg.OWNER_PHONE) == to:
+                    who = f"you ({to})"
+            except ValueError:
+                pass
+        why = self.UNDELIVERED_HINTS.get(error_code, "the carrier didn't say why")
+        code = f" · error {error_code}" if error_code else ""
+        self.log(None, kid, "error", f"Text to {who} was not delivered: {why}{code}")
+
+    def texting_blocked_recently(self, days: int = 7) -> bool:
+        since = iso(self.clock() - timedelta(days=days))
+        return self.db.execute(
+            "SELECT 1 FROM events WHERE kind='error' AND detail LIKE '%error 30034%' AND at >= ? LIMIT 1",
+            (since,)).fetchone() is not None
+
     def family_reply(self, from_phone: str, body: str) -> str:
         """Handle a text from a family contact. Returns the reply to send back."""
         try:
@@ -439,6 +511,10 @@ class Engine:
         except ValueError:
             return ""
         word = body.strip().split()[0].upper().strip(".!") if body.strip() else ""
+        if word in ("STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "START", "UNSTOP", "YES START"):
+            return ""  # Twilio handles opt-out and opt-in replies itself
+        if word in ("HELP", "INFO"):
+            return self.help_text()
         rows = self.db.execute(
             f"""SELECT c.*, k.name AS kname, k.contact1_name, k.contact1_phone, k.contact2_name, k.contact2_phone
                 FROM checkins c JOIN kupuna k ON k.id=c.kupuna_id
@@ -499,4 +575,5 @@ class Engine:
                     parts.append(f"{day} they missed the calls; {r['resolved_by']} confirmed they were okay.")
                 else:
                     parts.append(f"{day} they missed the calls and nobody replied OK.")
+        parts.append("Reply STOP to opt out.")
         return " ".join(parts)
