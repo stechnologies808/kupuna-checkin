@@ -599,3 +599,101 @@ class Removing(unittest.TestCase):
         self.assertIn("Restore", page)
         c.post(f"/admin/restore/{kid}", headers=auth)
         self.assertIn(f"/admin/edit/{kid}", c.get("/admin", headers=auth).get_data(as_text=True))
+
+
+class PickyPhone(ph.DryRunPhone):
+    """Like Twilio: refuses some numbers."""
+    def __init__(self, bad_sms=(), bad_calls=(), bad_alerts=()):
+        super().__init__(quiet=True)
+        self.bad_sms, self.bad_calls, self.bad_alerts = set(bad_sms), set(bad_calls), set(bad_alerts)
+
+    def send_sms(self, to, body):
+        if to in self.bad_sms:
+            raise ph.TwilioError(f"Twilio refused the message to {to}: Invalid 'To' Phone Number")
+        return super().send_sms(to, body)
+
+    def alert_call(self, to, message):
+        if to in self.bad_alerts:
+            raise ph.TwilioError(f"Twilio refused the call to {to}")
+        return super().alert_call(to, message)
+
+    def place_checkin_call(self, to, checkin_id):
+        if to in self.bad_calls:
+            raise ph.TwilioError(f"Twilio refused the call to {to}")
+        return super().place_checkin_call(to, checkin_id)
+
+
+class FailureHandling(unittest.TestCase):
+    def three_misses(self, e, clock):
+        clock.go(1); e.tick()
+        for _ in range(2):
+            miss(e); clock.go(5); e.tick()
+        miss(e)
+
+    def test_impossible_numbers_rejected_at_signup(self):
+        for bad in ("808-000-0000", "808-155-1234", "008-555-1234", "(108) 555-1234"):
+            with self.assertRaises(ValueError, msg=bad):
+                normalize_phone(bad)
+        self.assertEqual(normalize_phone("1 (808) 555-0142"), "+18085550142")
+
+    def test_family_text_refused_still_calls_family_and_moves_on(self):
+        e, phone, clock, kid = make()
+        e.phone = PickyPhone(bad_sms={"+18085550110"})
+        self.three_misses(e, clock)
+        self.assertEqual(today(e, kid)["status"], "alerted")
+        self.assertIn(("alert", "+18085550110"), [(k, t) for k, t, _ in e.phone.sent])
+        errors = [r["detail"] for r in e.db.execute("SELECT detail FROM events WHERE kind='error'")]
+        self.assertTrue(any("Couldn't text Kainoa" in d for d in errors), errors)
+        clock.go(15); e.tick()
+        self.assertEqual(today(e, kid)["status"], "backup_alerted", "backup still reached after 15 min")
+
+    def test_family_unreachable_goes_straight_to_backup(self):
+        e, phone, clock, kid = make()
+        e.phone = PickyPhone(bad_sms={"+18085550110"}, bad_alerts={"+18085550110"})
+        self.three_misses(e, clock)
+        self.assertEqual(today(e, kid)["status"], "backup_alerted")
+        self.assertIn(("sms", "+18085550133"), [(k, t) for k, t, _ in e.phone.sent])
+
+    def test_refused_checkin_call_counts_as_miss_and_still_alerts_family(self):
+        e, phone, clock, kid = make()
+        e.phone = PickyPhone(bad_calls={"+18085550142"})
+        clock.go(1); e.tick()
+        self.assertEqual(today(e, kid)["status"], "waiting_retry")
+        for _ in range(2):
+            clock.go(5); e.tick()
+        self.assertEqual(today(e, kid)["status"], "alerted")
+        self.assertIn(("sms", "+18085550110"), [(k, t) for k, t, _ in e.phone.sent])
+
+    def test_one_bad_record_does_not_block_others(self):
+        e, phone, clock, kid = make()
+        other = e.add_kupuna(name="Uncle Walter", phone="808-555-0177", call_time="08:00", language="English",
+                             contact1_name="Dana", contact1_phone="808-555-0178", contact2_name="Bobby",
+                             contact2_phone="808-555-0179", consent_note="ok")
+        # simulate an old bad row saved before validation existed
+        e.db.execute("UPDATE kupuna SET contact1_phone='+18080000000', contact2_phone='+18080000001' WHERE id=?", (kid,))
+        e.phone = PickyPhone(bad_sms={"+18080000000", "+18080000001"}, bad_alerts={"+18080000000", "+18080000001"})
+        self.three_misses_for(e, clock, kid)
+        # the other person's morning went normally
+        self.assertIn(("call", "+18085550177"), [(k, t) for k, t, _ in e.phone.sent])
+        # and nothing raised out of tick
+        for _ in range(5):
+            clock.go(1); e.tick()
+
+    def three_misses_for(self, e, clock, kid):
+        clock.go(1); e.tick()
+        for _ in range(3):
+            c = today(e, kid)
+            if c["status"] == "calling":
+                e.call_finished(c["id"], c["call_sid"], "no-answer")
+            clock.go(5); e.tick()
+
+    def test_removing_after_failures_works(self):
+        e, phone, clock, kid = make()
+        e.phone = PickyPhone(bad_sms={"+18085550110"}, bad_alerts={"+18085550110", "+18085550133"})
+        self.three_misses(e, clock)
+        e.remove_kupuna(kid)
+        self.assertIsNotNone(e.kupuna(kid)["removed_at"])
+
+    def test_database_waits_instead_of_failing_fast(self):
+        conn = db.connect(":memory:")
+        self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
