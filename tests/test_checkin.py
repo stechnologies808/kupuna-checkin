@@ -10,7 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-os.environ.update(DATABASE_PATH=":memory:", DISABLE_SCHEDULER="1", DRY_RUN="1", ADMIN_PASSWORD="pw")
+os.environ.update(DATABASE_PATH=":memory:", DISABLE_SCHEDULER="1", DRY_RUN="1", ADMIN_PASSWORD="pw",
+                  OWNER_PHONE="808-555-0999", PAYMENT_LINK_BASIC="https://buy.stripe.com/test_basic")
 
 import db  # noqa: E402
 import phone as ph  # noqa: E402
@@ -235,6 +236,39 @@ class QuietHoursAndTesting(unittest.TestCase):
         self.assertEqual(today(e, kid)["attempts"], 1)
 
 
+class Editing(unittest.TestCase):
+    def test_update_changes_only_what_changed_and_logs_it(self):
+        e, phone, clock, kid = make()
+        k = dict(e.kupuna(kid))
+        k.update(call_time="9:30", contact1_name="Kainoa K.", contact1_phone="808-555-0199")
+        e.update_kupuna(kid, **k)
+        k2 = e.kupuna(kid)
+        self.assertEqual(k2["call_time"], "09:30")
+        self.assertEqual(k2["contact1_phone"], "+18085550199")
+        self.assertEqual(k2["consent_at"], e.kupuna(kid)["consent_at"])
+        last = e.db.execute("SELECT detail FROM events ORDER BY id DESC LIMIT 1").fetchone()["detail"]
+        self.assertIn("call time", last); self.assertIn("family contact", last)
+
+    def test_update_validates(self):
+        e, phone, clock, kid = make()
+        k = dict(e.kupuna(kid)); k["call_time"] = "05:00"
+        with self.assertRaises(ValueError):
+            e.update_kupuna(kid, **k)
+        k = dict(e.kupuna(kid)); k["contact2_name"] = " "
+        with self.assertRaises(ValueError):
+            e.update_kupuna(kid, **k)
+
+    def test_new_call_time_used_next_morning(self):
+        e, phone, clock, kid = make()
+        clock.go(1); e.tick(); e.keypress(today(e, kid)["id"], "1")
+        k = dict(e.kupuna(kid)); k["call_time"] = "10:00"
+        e.update_kupuna(kid, **k)
+        clock.go(24 * 60); e.tick()
+        self.assertEqual(len(e.db.execute("SELECT * FROM checkins").fetchall()), 1, "not at 8 the next day")
+        clock.go(120); e.tick()
+        self.assertEqual(len(e.db.execute("SELECT * FROM checkins").fetchall()), 2)
+
+
 class WeeklySummary(unittest.TestCase):
     def test_sunday_evening_summary_sent_once(self):
         e, phone, clock, kid = make(day=5)  # Monday 5 Oct
@@ -343,6 +377,20 @@ class Webhooks(unittest.TestCase):
         sig = ph.twilio_signature("12345", "https://example.com/myapp.php?foo=1&bar=2", params)
         self.assertEqual(sig, "L/OH5YylLD5NRKLltdqwSvS0BnU=")
 
+    def test_edit_page_and_save(self):
+        auth = {"Authorization": "Basic " + base64.b64encode(b"x:pw").decode()}
+        r = self.client.get(f"/admin/edit/{self.kid}", headers=auth)
+        body = r.get_data(as_text=True)
+        self.assertIn("Edit Mr. Hiroshi Tanaka", body)
+        self.assertIn("value='+18085550110'", body)
+        self.assertIn("<option selected>Japanese</option>", body)
+        data = {k: str(self.m.engine.kupuna(self.kid)[k]) for k in self.m.engine.FIELDS}
+        data["contact2_name"] = "Pastor Ito"
+        r = self.client.post(f"/admin/edit/{self.kid}", data=data, headers=auth)
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(self.m.engine.kupuna(self.kid)["contact2_name"], "Pastor Ito")
+        self.assertIn("/admin/edit/", self.client.get("/admin", headers=auth).get_data(as_text=True))
+
     def test_admin_needs_password(self):
         self.assertEqual(self.client.get("/admin").status_code, 401)
         auth = {"Authorization": "Basic " + base64.b64encode(b"x:pw").decode()}
@@ -354,3 +402,176 @@ class Webhooks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+GOOD_SIGNUP = dict(plan="basic", family_name="Kainoa Kekona", family_phone="425-555-0110", family_email="kainoa@example.com",
+                   relationship="Son", kupuna_name="Auntie Leilani", kupuna_phone="808-555-0142", call_time="08:30",
+                   language="Pidgin", backup_name="Mele", backup_phone="808-555-0133", notes="Hard of hearing",
+                   agree_consent="on", agree_911="on")
+
+
+class SignupFlow(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import app as app_module
+        import signup
+        cls.m, cls.signup = app_module, signup
+        cls.client = app_module.app.test_client()
+        cls.auth = {"Authorization": "Basic " + base64.b64encode(b"x:pw").decode()}
+
+    def setUp(self):
+        self.m.engine.db = db.connect(":memory:")
+        self.m.engine.phone = ph.DryRunPhone(quiet=True)
+        self.m.engine.clock = Clock(10, 0)
+        self.signup._recent.clear()
+
+    def post(self, **over):
+        d = dict(GOOD_SIGNUP); d.update(over)
+        return self.client.post("/signup", data={k: v for k, v in d.items() if v is not None})
+
+    def test_home_is_public_signup_page(self):
+        r = self.client.get("/", follow_redirects=True)
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        self.assertIn("A friendly call every morning", body)
+        self.assertIn("$12/month", body)
+
+    def test_signup_saved_owner_texted_no_calls_yet(self):
+        r = self.post()
+        body = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("You're signed up", body)
+        self.assertIn("https://buy.stripe.com/test_basic", body)
+        s = self.m.engine.db.execute("SELECT * FROM signups").fetchone()
+        self.assertEqual((s["status"], s["kupuna_phone"], s["family_phone"]), ("new", "+18085550142", "+14255550110"))
+        self.assertEqual(self.m.engine.phone.sent[0][:2], ("sms", "+18085550999"))
+        self.assertEqual(self.m.engine.db.execute("SELECT COUNT(*) FROM kupuna").fetchone()[0], 0)
+        self.m.engine.clock.go(60); self.m.engine.tick()
+        self.assertEqual([k for k, *_ in self.m.engine.phone.sent], ["sms"], "nobody called before approval")
+
+    def test_missing_info_shows_error_and_keeps_answers(self):
+        r = self.post(backup_phone="")
+        body = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("backup contact&#x27;s phone", body)
+        self.assertIn("value=\"Kainoa Kekona\"", body)
+
+    def test_boxes_must_be_ticked(self):
+        self.assertEqual(self.post(agree_911=None).status_code, 400)
+
+    def test_bad_time_and_email(self):
+        self.assertIn("between 7 AM and 9 PM", self.post(call_time="06:00").get_data(as_text=True))
+        self.assertIn("email address", self.post(family_email="nope").get_data(as_text=True))
+
+    def test_bot_honeypot_saves_nothing(self):
+        self.post(website="http://spam")
+        self.assertEqual(self.m.engine.db.execute("SELECT COUNT(*) FROM signups").fetchone()[0], 0)
+
+    def test_rate_limit(self):
+        for _ in range(5):
+            self.post()
+        self.assertEqual(self.post().status_code, 429)
+
+    def test_html_is_escaped(self):
+        self.post(kupuna_name="<script>x</script>")
+        r = self.client.get("/admin", headers=self.auth)
+        self.assertNotIn("<script>x</script>", r.get_data(as_text=True))
+
+    def test_review_approve_starts_calls(self):
+        self.post()
+        sid = self.m.engine.db.execute("SELECT id FROM signups").fetchone()[0]
+        self.assertIn("New sign-ups (1)", self.client.get("/admin", headers=self.auth).get_data(as_text=True))
+        page = self.client.get(f"/admin/signup/{sid}", headers=self.auth).get_data(as_text=True)
+        self.assertIn("value='+18085550142'", page)
+        self.assertIn("Approve and start calls", page)
+        fields = {"name": "Auntie Leilani", "phone": "+18085550142", "call_time": "08:30", "language": "Pidgin",
+                  "contact1_name": "Kainoa Kekona", "contact1_phone": "+14255550110", "contact2_name": "Mele",
+                  "contact2_phone": "+18085550133", "consent_note": ""}
+        r = self.client.post(f"/admin/signup/{sid}/approve", data=fields, headers=self.auth)
+        self.assertIn("consent", r.headers["Location"].lower(), "consent note required")
+        fields["consent_note"] = "Called Auntie 10/7, she agreed"
+        self.client.post(f"/admin/signup/{sid}/approve", data=fields, headers=self.auth)
+        s = self.m.engine.signup(sid)
+        self.assertEqual(s["status"], "approved")
+        self.assertEqual(self.m.engine.kupuna(s["kupuna_id"])["contact1_phone"], "+14255550110")
+        self.assertNotIn("New sign-ups", self.client.get("/admin", headers=self.auth).get_data(as_text=True))
+
+    def test_decline(self):
+        self.post()
+        sid = self.m.engine.db.execute("SELECT id FROM signups").fetchone()[0]
+        self.client.post(f"/admin/signup/{sid}/decline", headers=self.auth)
+        self.assertEqual(self.m.engine.signup(sid)["status"], "declined")
+        self.assertEqual(self.m.engine.db.execute("SELECT COUNT(*) FROM kupuna").fetchone()[0], 0)
+
+    def test_review_page_needs_password(self):
+        self.assertEqual(self.client.get("/admin/signup/1").status_code, 401)
+
+
+class Removing(unittest.TestCase):
+    def test_remove_stops_retries_and_alerts_midway(self):
+        e, phone, clock, kid = make()
+        clock.go(1); e.tick(); miss(e)                      # first try missed, retry pending
+        e.remove_kupuna(kid)
+        before = len(phone.sent)
+        for _ in range(60):
+            clock.go(1); e.tick()
+        self.assertEqual(len(phone.sent), before, "no calls or alerts after removal")
+        self.assertEqual(today(e, kid)["status"], "skipped")
+        clock.go(24 * 60); e.tick()
+        self.assertEqual(len(phone.sent), before, "not called the next day either")
+
+    def test_remove_while_family_alerted_stops_backup(self):
+        e, phone, clock, kid = make()
+        clock.go(1); e.tick()
+        for _ in range(2):
+            miss(e); clock.go(5); e.tick()
+        miss(e)
+        e.remove_kupuna(kid)
+        clock.go(30); e.tick()
+        self.assertNotIn("+18085550133", [to for _, to, _ in phone.sent])
+
+    def test_history_kept_and_restore(self):
+        e, phone, clock, kid = make()
+        clock.go(1); e.tick(); e.keypress(today(e, kid)["id"], "1")
+        e.remove_kupuna(kid)
+        self.assertIsNotNone(e.kupuna(kid)["removed_at"])
+        self.assertEqual(len(e.db.execute("SELECT * FROM checkins WHERE kupuna_id=?", (kid,)).fetchall()), 1)
+        e.restore_kupuna(kid)
+        self.assertIsNone(e.kupuna(kid)["removed_at"])
+        clock.go(24 * 60); e.tick()
+        self.assertEqual(len(e.db.execute("SELECT * FROM checkins WHERE kupuna_id=?", (kid,)).fetchall()), 2)
+
+    def test_old_database_upgrades_without_losing_people(self):
+        import sqlite3, tempfile
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        old = sqlite3.connect(path)
+        old.executescript(db.SCHEMA.replace(",\n    removed_at      TEXT                    -- set when taken off the list; history is kept", ""))
+        old.execute("INSERT INTO kupuna (name, phone, call_time, language, contact1_name, contact1_phone, contact2_name,"
+                    " contact2_phone, consent_note, consent_at, created_at) VALUES ('Sarah','+18085550100','09:00',"
+                    "'English','A','+18085550101','B','+18085550102','self','x','x')")
+        old.commit()
+        self.assertNotIn("removed_at", [r[1] for r in old.execute("PRAGMA table_info(kupuna)")])
+        old.close()
+        conn = db.connect(path)
+        row = conn.execute("SELECT * FROM kupuna").fetchone()
+        self.assertEqual(row["name"], "Sarah")
+        self.assertIsNone(row["removed_at"])
+        db.connect(path)  # running the upgrade twice is harmless
+
+    def test_admin_remove_confirm_and_restore(self):
+        import app as m
+        m.engine.db = db.connect(":memory:"); m.engine.phone = ph.DryRunPhone(quiet=True); m.engine.clock = Clock(10, 0)
+        kid = m.engine.add_kupuna(name="Test Person", phone="8085550100", call_time="09:00", language="English",
+                                  contact1_name="A", contact1_phone="8085550101", contact2_name="B",
+                                  contact2_phone="8085550102", consent_note="self")
+        c = m.app.test_client(); auth = {"Authorization": "Basic " + base64.b64encode(b"x:pw").decode()}
+        page = c.get("/admin", headers=auth).get_data(as_text=True)
+        self.assertIn(f"/admin/remove/{kid}", page)
+        self.assertIn("Yes, remove Test Person", c.get(f"/admin/remove/{kid}", headers=auth).get_data(as_text=True))
+        self.assertIsNone(m.engine.kupuna(kid)["removed_at"], "viewing the confirm page removes nothing")
+        c.post(f"/admin/remove/{kid}", headers=auth)
+        page = c.get("/admin", headers=auth).get_data(as_text=True)
+        self.assertNotIn(f"/admin/edit/{kid}", page)
+        self.assertIn("Restore", page)
+        c.post(f"/admin/restore/{kid}", headers=auth)
+        self.assertIn(f"/admin/edit/{kid}", c.get("/admin", headers=auth).get_data(as_text=True))
