@@ -898,3 +898,22 @@ class TextingCompliance(unittest.TestCase):
         alert = next(b for k, to, b in phone.sent if k == "sms")
         self.assertIn("Reply STOP to opt out.", alert)
         self.assertIn("Reply STOP to opt out.", e.weekly_text(e.kupuna(kid), clock().date(), clock().date()))
+
+
+class TermsPage(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import app as m
+        cls.c = m.app.test_client()
+
+    def test_terms_page_has_sms_program_details(self):
+        r = self.c.get("/terms")
+        body = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 200)
+        for phrase in ("Message and data rates may apply", "STOP", "HELP", "Carriers are not liable",
+                       "does not call 911", "808-555-0999", "Hawaiʻi"):
+            self.assertIn(phrase, body)
+
+    def test_terms_linked_from_signup_and_privacy(self):
+        self.assertIn('href="/terms"', self.c.get("/signup").get_data(as_text=True))
+        self.assertIn('href="/terms"', self.c.get("/privacy").get_data(as_text=True))
