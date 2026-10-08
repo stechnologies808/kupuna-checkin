@@ -18,6 +18,7 @@ from html import escape
 
 from flask import Flask, Response, abort, redirect, request, session, url_for
 
+import backup
 import db
 import phone as ph
 import signup
@@ -159,6 +160,7 @@ form.inline{display:inline}a.btn{display:inline-block;padding:4px 10px;border-ra
 <section><h2>Add a kūpuna</h2><div class="box"><form class="add" method="post" action="{add_url}">
 {add_fields}<div><button type="submit">Add to the list</button></div></form></div></section>
 {removed}
+{backups}
 </main><script>
 // Refresh every 30 s to show new activity, but never while someone is filling in the form.
 setInterval(function(){
@@ -265,6 +267,7 @@ def admin():
         events = engine.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 60").fetchall()
         signups_html = signup.pending_section(engine, url_for)
         blocked = engine.texting_blocked_recently()
+    last_copy = backup.latest_copy(cfg.DATABASE_PATH)
     rows = []
     for k in kup:
         c = today.get(k["id"])
@@ -296,6 +299,7 @@ def admin():
                      if blocked else "")
             .replace("{signups}", signups_html)
             .replace("{removed}", removed_html)
+            .replace("{backups}", backups_html(last_copy))
             .replace("{flash}", f"<p class='err'>{escape(flash)}</p>" if flash else "")
             .replace("{rows}", "".join(rows) or "<tr><td colspan='5' class='mu'>No kūpuna yet. Add one below.</td></tr>")
             .replace("{events}", ev or "<tr><td colspan='2' class='mu'>Nothing yet.</td></tr>")
@@ -403,6 +407,41 @@ def admin_toggle(kupuna_id):
     return redirect(url_for("admin"))
 
 
+# ---------- backups ----------
+def backups_html(last_copy: str | None) -> str:
+    auto = (f"Automatic copy saved daily on the server (last: {escape(last_copy)}, keeps {backup.KEEP_DAYS} days)."
+            if last_copy else "Automatic daily copy: the first one is saved within a minute of the app starting.")
+    return ("<section><h2>Backups</h2><div class='box' style='padding:14px;display:grid;gap:10px'>"
+            f"<p class='mu' style='margin:0'>{auto} Download a copy now and then and keep it somewhere safe "
+            "(email it to yourself or save it to Google Drive).</p><div>"
+            f"<a class='btn' href='{url_for('admin_backup_file')}'>Download full backup</a> "
+            f"<a class='btn' href='{url_for('admin_people_csv')}'>Download list as spreadsheet</a></div></div></section>")
+
+
+def _download(data, filename: str, mimetype: str) -> Response:
+    return Response(data, mimetype=mimetype, headers={
+        "Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"})
+
+
+@app.get("/admin/backup.db")
+@admin_only
+def admin_backup_file():
+    with lock:
+        data = backup.snapshot_bytes(engine.db)
+        stamp = engine.local(engine.clock()).strftime("%Y-%m-%d")
+        engine.log(None, None, "backup", "Full backup downloaded")
+    return _download(data, f"kupuna-checkin-backup-{stamp}.db", "application/octet-stream")
+
+
+@app.get("/admin/people.csv")
+@admin_only
+def admin_people_csv():
+    with lock:
+        data = backup.people_csv(engine.db)
+        stamp = engine.local(engine.clock()).strftime("%Y-%m-%d")
+    return _download("\ufeff" + data, f"kupuna-list-{stamp}.csv", "text/csv; charset=utf-8")
+
+
 signup.register(app, engine, lock, admin_only, PAGE[:PAGE.index("<header")])
 
 
@@ -419,6 +458,11 @@ def scheduler_loop(every_seconds: int = 20):
                 engine.tick()
         except Exception as e:  # keep going; a Twilio hiccup shouldn't stop tomorrow's calls
             app.logger.exception("Scheduler tick failed: %s", e)
+        try:
+            with lock:
+                backup.daily_copy(engine.db, cfg.DATABASE_PATH, engine.local(engine.clock()).date())
+        except Exception as e:  # a failed copy must never stop the calls
+            app.logger.exception("Daily backup failed: %s", e)
         time.sleep(every_seconds)
 
 

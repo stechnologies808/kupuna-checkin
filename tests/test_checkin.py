@@ -917,3 +917,76 @@ class TermsPage(unittest.TestCase):
     def test_terms_linked_from_signup_and_privacy(self):
         self.assertIn('href="/terms"', self.c.get("/signup").get_data(as_text=True))
         self.assertIn('href="/terms"', self.c.get("/privacy").get_data(as_text=True))
+
+
+class Backups(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import app as m
+        cls.m = m
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "checkin.db")
+        self.conn = db.connect(self.path)
+        self.conn.execute(
+            "INSERT INTO kupuna (name, phone, call_time, contact1_name, contact1_phone, contact2_name, contact2_phone,"
+            " consent_note, consent_at, created_at) VALUES ('=Auntie Leilani','+18085550101','08:00','Kai','+18085550102',"
+            "'Noe','+18085550103','test','2026-10-01','2026-10-01')")
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_daily_copy_once_per_day_and_readable(self):
+        import backup
+        from datetime import date
+        first = backup.daily_copy(self.conn, self.path, date(2026, 10, 8))
+        self.assertTrue(first.exists())
+        self.assertIsNone(backup.daily_copy(self.conn, self.path, date(2026, 10, 8)))
+        import sqlite3
+        copy = sqlite3.connect(str(first))
+        self.assertEqual(copy.execute("SELECT name FROM kupuna").fetchone()[0], "=Auntie Leilani")
+        copy.close()
+        self.assertEqual(backup.latest_copy(self.path), "2026-10-08")
+
+    def test_old_copies_are_dropped(self):
+        import backup
+        from datetime import date
+        for d in range(1, 21):
+            backup.daily_copy(self.conn, self.path, date(2026, 10, d))
+        kept = sorted(p.name for p in backup.backup_dir(self.path).glob("checkin-*.db"))
+        self.assertEqual(len(kept), backup.KEEP_DAYS)
+        self.assertEqual(kept[0], "checkin-2026-10-07.db")
+        self.assertEqual(kept[-1], "checkin-2026-10-20.db")
+
+    def test_memory_database_is_skipped(self):
+        import backup
+        from datetime import date
+        self.assertIsNone(backup.daily_copy(self.conn, ":memory:", date(2026, 10, 8)))
+
+    def test_spreadsheet_is_safe_to_open(self):
+        import backup
+        text = backup.people_csv(self.conn)
+        self.assertIn("Family contact", text.splitlines()[0])
+        self.assertIn("'=Auntie Leilani", text)
+        self.assertIn("Active", text)
+
+    def test_download_needs_sign_in(self):
+        c = self.m.app.test_client()
+        self.assertEqual(c.get("/admin/backup.db").status_code, 302)
+        self.assertEqual(c.get("/admin/people.csv").status_code, 302)
+
+    def test_downloads_when_signed_in(self):
+        c = self.m.app.test_client()
+        self.m._login_tries.clear()
+        c.post("/admin/login", data={"password": "pw"})
+        r = c.get("/admin/backup.db")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.data.startswith(b"SQLite format 3"))
+        self.assertIn("attachment", r.headers["Content-Disposition"])
+        r = c.get("/admin/people.csv")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Name,Phone", r.get_data(as_text=True))
+        self.assertIn("Download full backup", c.get("/admin").get_data(as_text=True))

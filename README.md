@@ -133,3 +133,14 @@ made by a person. While hidden, the page offers only Daily Check-In.
 Timing rules (tries, minutes between tries, family reply window, quiet hours, weekly
 summary day and hour) are all settings in `.env`; see `config.py` for the full list.
 Calls are never started before 7 AM or after 9 PM Hawaii time.
+
+## Backups
+
+- **Automatic:** once a day the app saves a copy of the database in `backups/` next to it
+  (`/var/data/backups/` on Render) and keeps the last 14 days. Render also snapshots the disk daily.
+- **Download:** the admin page has **Download full backup** (the whole database) and
+  **Download list as spreadsheet** (kūpuna and their contacts). Save one somewhere off Render now and then.
+- **Restoring:** in Render, open the service's **Shell**, then
+  `rm -f /var/data/checkin.db-wal /var/data/checkin.db-shm && cp /var/data/backups/checkin-YYYY-MM-DD.db /var/data/checkin.db`,
+  then restart the service right away.
+  A downloaded backup can be restored the same way after uploading it. Ask for help if you need to do this.
