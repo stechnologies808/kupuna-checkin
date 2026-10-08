@@ -144,11 +144,11 @@ def signup_page(cfg, form=None, error=""):
   <label class="check"><input type="checkbox" id="agree_consent" name="agree_consent" {'checked' if form.get('agree_consent') else ''}>
     I understand you'll call my kūpuna to introduce yourselves and get their OK before daily calls begin.</label>
   <label class="check"><input type="checkbox" id="agree_sms" name="agree_sms" {'checked' if form.get('agree_sms') else ''}>
-    <span>I agree to receive check-in alert texts from Kupuna Check-In at the phone numbers above. Message frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. See our <a href="{url_for('privacy')}">privacy policy</a>.</span></label>
+    <span>I agree to receive check-in alert texts from Kupuna Check-In at the phone numbers above. Message frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. See our <a href="{url_for('terms')}">terms</a> and <a href="{url_for('privacy')}">privacy policy</a>.</span></label>
   <label class="check"><input type="checkbox" id="agree_911" name="agree_911" {'checked' if form.get('agree_911') else ''}>
     I understand this service texts and calls family. It does not call 911 and is not a medical alert system.</label>
   <button type="submit">Sign up</button>
-  <p class="small">We use these phone numbers only for check-in calls and alerts, and never sell or share them. <a href="{url_for('privacy')}">Privacy policy</a></p>
+  <p class="small">We use these phone numbers only for check-in calls and alerts, and never sell or share them. <a href="{url_for('privacy')}">Privacy policy</a> · <a href="{url_for('terms')}">Terms</a></p>
 </form>
 </main></body></html>""")
 
@@ -166,7 +166,7 @@ def thanks_page(cfg, s):
   <li><h3>Calls begin</h3><span class="mu">Every day at the time you picked.</span></li>
 </ol>
 {pay}
-<p class="small">Questions? Reply to the text we send you. <a href="{url_for('privacy')}">Privacy policy</a></p>
+<p class="small">Questions? Reply to the text we send you. <a href="{url_for('privacy')}">Privacy policy</a> · <a href="{url_for('terms')}">Terms</a></p>
 </main></body></html>""")
 
 
@@ -197,7 +197,50 @@ information only to provide those services to us. We never sell your information
 the call log and consent record, which we keep for up to one year in case questions come up later.</p>
 <h2>Questions or deletion requests</h2>
 <p>{reach}</p>
-<p><a href="{url_for('signup_form')}">Back to sign up</a></p>
+<p><a href="{url_for('terms')}">Terms and conditions</a> · <a href="{url_for('signup_form')}">Back to sign up</a></p>
+</section>
+</main></body></html>""")
+
+
+def terms_page(cfg, contact: str):
+    reach = f"text or call {escape(contact)}" if contact else "reply to any text we send you"
+    help_line = f" or {reach}" if contact else ""
+    return (PUBLIC_HEAD.replace("{title}", "Kupuna Check-In · Terms") + f"""
+<section class="hero"><span class="eyebrow">Kupuna Check-In</span><h1>Terms and conditions</h1>
+<p class="mu">Last updated October 8, 2026</p></section>
+<section class="policy">
+<h2>The service</h2>
+<p>Kupuna Check-In places an automated phone call to a senior ("kūpuna") at a time chosen at sign-up. If the kūpuna does
+not press 1 after three tries, or presses 2 to ask for help, we text and call the family contact, and the backup contact
+if the family contact does not reply. Family contacts may also receive a weekly summary text.</p>
+<h2>Not an emergency service</h2>
+<p><b>Kupuna Check-In does not call 911, does not monitor health, and is not a medical alert system.</b> In an emergency,
+call 911. Calls and texts depend on phone networks and outside providers, and may be delayed or fail. We do not guarantee
+that every call or alert will be placed or received.</p>
+<h2>Who can sign up</h2>
+<p>You must be at least 18 years old. Before daily calls begin, we call the kūpuna to introduce the service and get their
+agreement. You agree that the phone numbers you give us belong to you, the kūpuna and your backup contact, and that your
+backup contact is willing to be contacted.</p>
+<h2>Text messages</h2>
+<p><b>Program:</b> Kupuna Check-In alerts. <b>What you receive:</b> alerts when your kūpuna misses a check-in call or asks
+for help, a welcome text when service starts, and a weekly summary. <b>Frequency:</b> varies; most weeks it is one text.
+<b>Message and data rates may apply.</b> Reply <b>STOP</b> to any text to opt out at any time; you will get one text
+confirming you are unsubscribed. Reply <b>HELP</b> for help{help_line}. Carriers are not liable for delayed or
+undelivered messages. Opting out of texts does not cancel the phone calls; contact us to cancel the service.</p>
+<h2>Price, free trial and cancelling</h2>
+<p>Prices are shown on the sign-up page. While we are getting started, the first month is free. You can cancel at any
+time by contacting us; service stops right away and you will not be charged for later months.</p>
+<h2>Limits on our responsibility</h2>
+<p>To the extent allowed by law, Kupuna Check-In is not responsible for harm that results from a call or text that is
+missed, delayed or not delivered, or from anything that happens to the kūpuna. If we are found responsible for anything,
+the most we owe is what you paid us in the three months before the claim.</p>
+<h2>Changes</h2>
+<p>We may update these terms. If we make an important change, we will text the family contact before it takes effect.</p>
+<h2>Law</h2>
+<p>These terms are governed by the laws of the State of Hawaiʻi.</p>
+<h2>Contact</h2>
+<p>Questions, or to cancel: {reach}.</p>
+<p><a href="{url_for('privacy')}">Privacy policy</a> · <a href="{url_for('signup_form')}">Back to sign up</a></p>
 </section>
 </main></body></html>""")
 
@@ -206,6 +249,10 @@ def register(app, engine, lock, admin_only, admin_head):
     @app.get("/privacy")
     def privacy():
         return privacy_page(engine.cfg, engine.owner_phone_pretty())
+
+    @app.get("/terms")
+    def terms():
+        return terms_page(engine.cfg, engine.owner_phone_pretty())
 
     @app.get("/signup")
     def signup_form():
