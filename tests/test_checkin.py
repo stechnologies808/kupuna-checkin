@@ -573,7 +573,10 @@ class Removing(unittest.TestCase):
         import sqlite3, tempfile
         path = os.path.join(tempfile.mkdtemp(), "old.db")
         old = sqlite3.connect(path)
-        old.executescript(db.SCHEMA.replace(",\n    removed_at      TEXT                    -- set when taken off the list; history is kept", ""))
+        import re
+        legacy = re.sub(r"\n    (removed_at|sms_ok) [^\n]*", "", db.SCHEMA)  # the first version had neither column
+        legacy = re.sub(r",(\s*(--[^\n]*)?)\n\);", r"\1\n);", legacy)  # drop the comma left before ");"
+        old.executescript(legacy)
         old.execute("INSERT INTO kupuna (name, phone, call_time, language, contact1_name, contact1_phone, contact2_name,"
                     " contact2_phone, consent_note, consent_at, created_at) VALUES ('Sarah','+18085550100','09:00',"
                     "'English','A','+18085550101','B','+18085550102','self','x','x')")
@@ -584,6 +587,8 @@ class Removing(unittest.TestCase):
         row = conn.execute("SELECT * FROM kupuna").fetchone()
         self.assertEqual(row["name"], "Sarah")
         self.assertIsNone(row["removed_at"])
+        self.assertEqual(row["sms_ok"], 1)  # people added before keep getting texts
+        self.assertIn("sms_ok", [r["name"] for r in conn.execute("PRAGMA table_info(signups)")])
         db.connect(path)  # running the upgrade twice is harmless
 
     def test_admin_remove_confirm_and_restore(self):
@@ -844,11 +849,15 @@ class TextingCompliance(unittest.TestCase):
         d = dict(GOOD_SIGNUP); d.update(over)
         return self.c.post("/signup", data={k: v for k, v in d.items() if v is not None})
 
-    def test_texting_consent_box_is_required(self):
+    def test_texting_consent_box_is_optional(self):
+        # Carriers reject campaigns that force SMS consent (Twilio error 30923).
         r = self.post(agree_sms=None)
-        self.assertEqual(r.status_code, 400)
-        self.assertEqual(self.m.engine.db.execute("SELECT COUNT(*) FROM signups").fetchone()[0], 0)
+        self.assertEqual(r.status_code, 200)
+        s = self.m.engine.db.execute("SELECT * FROM signups").fetchone()
+        self.assertEqual(s["sms_ok"], 0)
         body = self.c.get("/signup").get_data(as_text=True)
+        self.assertIn("Optional:", body)
+        self.assertNotIn('name="agree_sms" required', body)
         self.assertIn("Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help.", body)
         self.assertIn('href="/privacy"', body)
 
@@ -990,3 +999,56 @@ class Backups(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("Name,Phone", r.get_data(as_text=True))
         self.assertIn("Download full backup", c.get("/admin").get_data(as_text=True))
+
+
+class CallsOnlyFamilies(unittest.TestCase):
+    """Families who leave the texting box unticked get alert calls and never a text."""
+
+    def setUp(self):
+        self.e, self.phone, self.clock, self.kid = make()
+        self.e.set_texts(self.kid, False)
+
+    def miss_all(self):
+        self.clock.go(1); self.e.tick()
+        for _ in range(2):
+            miss(self.e); self.clock.go(5); self.e.tick()
+        miss(self.e)
+
+    def test_alerts_are_calls_only_then_backup(self):
+        self.miss_all()
+        kinds = [(k, to) for k, to, _ in self.phone.sent]
+        self.assertIn(("alert", "+18085550110"), kinds)
+        self.assertFalse([k for k, _, _ in self.phone.sent if k == "sms"])
+        voice = next(c for k, to, c in self.phone.sent if k == "alert")
+        self.assertNotIn("text", voice)
+        self.assertIn("Mele", voice)
+        self.clock.go(Config.FAMILY_REPLY_WINDOW_MIN); self.e.tick()
+        self.assertIn(("alert", "+18085550133"), [(k, to) for k, to, _ in self.phone.sent])
+        self.assertFalse([k for k, _, _ in self.phone.sent if k == "sms"])
+
+    def test_help_and_welcome_send_no_texts(self):
+        self.e.send_welcome(self.kid)
+        self.clock.go(1); self.e.tick()
+        self.e.keypress(today(self.e, self.kid)["id"], "2")
+        self.assertFalse([k for k, _, _ in self.phone.sent if k == "sms"])
+        self.assertEqual(sum(1 for k, _, _ in self.phone.sent if k == "alert"), 2)
+
+    def test_turning_texts_back_on(self):
+        self.e.set_texts(self.kid, True)
+        self.miss_all()
+        self.assertIn(("sms", "+18085550110"), [(k, to) for k, to, _ in self.phone.sent])
+
+    def test_approving_a_calls_only_signup(self):
+        import app as m
+        e = m.engine
+        sid = e.add_signup(sms_ok=False, plan="basic", family_name="Kai", family_phone="808-555-0201",
+                           family_email="kai@example.com", relationship="son", kupuna_name="Tutu",
+                           kupuna_phone="808-555-0202", call_time="09:00", language="English",
+                           backup_name="Noe", backup_phone="808-555-0203", notes="")
+        before = len(e.phone.sent)
+        kid = e.approve_signup(sid, sms_ok=False, name="Tutu", phone="808-555-0202", call_time="09:00",
+                               language="English", contact1_name="Kai", contact1_phone="808-555-0201",
+                               contact2_name="Noe", contact2_phone="808-555-0203", consent_note="Called Tutu 10/11")
+        self.assertEqual(e.kupuna(kid)["sms_ok"], 0)
+        self.assertFalse([1 for k, to, _ in e.phone.sent[before:] if k == "sms" and to != "+18083922341"
+                          and to != "+18085550999"])

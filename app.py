@@ -193,6 +193,10 @@ def form_fields(values: dict, placeholders: bool = False) -> str:
         style = " style='grid-column:1/-1'" if key == "consent_note" else ""
         ph_attr = f" placeholder='{escape(ph_text)}'" if placeholders and ph_text else ""
         out.append(f"<label{style}>{label}<input name='{key}' type='{typ}' value='{v}' required{ph_attr}></label>")
+    texts_on = str(values.get("sms_ok", 1)) not in ("0", "False")
+    out.append("<label>Alert texts to family<select name='sms_ok'>"
+               f"<option value='1'{' selected' if texts_on else ''}>Yes, they agreed to texts</option>"
+               f"<option value='0'{'' if texts_on else ' selected'}>No, phone calls only</option></select></label>")
     return "\n".join(out)
 
 
@@ -276,7 +280,8 @@ def admin():
         toggle = "Pause" if k["active"] else "Resume"
         rows.append(
             f"<tr><td><b>{escape(k['name'])}</b><br><span class='mono'>{escape(k['phone'])} · {escape(k['language'])}</span>"
-            f"<br><span class='mu'>Family: {escape(k['contact1_name'])} · Backup: {escape(k['contact2_name'])}</span></td>"
+            f"<br><span class='mu'>Family: {escape(k['contact1_name'])} · Backup: {escape(k['contact2_name'])}"
+            f"{'' if k['sms_ok'] else ' · calls only, no texts'}</span></td>"
             f"<td class='mono'>{escape(k['call_time'])}</td><td><span class='pill {tone}'>{escape(label)}</span></td>"
             f"<td class='mono'>{c['attempts'] if c else 0}</td><td>"
             f"<form class='inline' method='post' action='{url_for('admin_call_now', kupuna_id=k['id'])}'><button>Call now</button></form> "
@@ -316,7 +321,7 @@ def admin_add():
         with lock:
             kid = engine.add_kupuna(**{k: f.get(k, "") for k in (
                 "name", "phone", "call_time", "language", "contact1_name", "contact1_phone",
-                "contact2_name", "contact2_phone", "consent_note")})
+                "contact2_name", "contact2_phone", "consent_note")}, sms_ok=f.get("sms_ok", "1") == "1")
             engine.send_welcome(kid)
     except ValueError as e:
         return redirect(url_for("admin", msg=str(e)))
@@ -347,6 +352,7 @@ def admin_edit_save(kupuna_id):
     try:
         with lock:
             engine.update_kupuna(kupuna_id, **{k: request.form.get(k, "") for k in engine.FIELDS})
+            engine.set_texts(kupuna_id, request.form.get("sms_ok", "1") == "1")
     except ValueError as e:
         return redirect(url_for("admin_edit", kupuna_id=kupuna_id, msg=str(e)))
     return redirect(url_for("admin"))

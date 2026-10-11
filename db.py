@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS kupuna (
     consent_at      TEXT NOT NULL,
     active          INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL,
-    removed_at      TEXT                    -- set when taken off the list; history is kept
+    removed_at      TEXT,                   -- set when taken off the list; history is kept
+    sms_ok          INTEGER NOT NULL DEFAULT 1  -- 0: contacts didn't agree to texts, so alert by call only
 );
 
 CREATE TABLE IF NOT EXISTS checkins (
@@ -62,7 +63,8 @@ CREATE TABLE IF NOT EXISTS signups (
     backup_phone    TEXT NOT NULL,
     notes           TEXT NOT NULL DEFAULT '',
     kupuna_id       INTEGER REFERENCES kupuna(id),
-    decided_at      TEXT
+    decided_at      TEXT,
+    sms_ok          INTEGER NOT NULL DEFAULT 1  -- ticked the optional texting box
 );
 
 CREATE TABLE IF NOT EXISTS summaries (
@@ -90,6 +92,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(kupuna)")}
     if "removed_at" not in cols:
         conn.execute("ALTER TABLE kupuna ADD COLUMN removed_at TEXT")
+    if "sms_ok" not in cols:
+        conn.execute("ALTER TABLE kupuna ADD COLUMN sms_ok INTEGER NOT NULL DEFAULT 1")
+    if "sms_ok" not in {r["name"] for r in conn.execute("PRAGMA table_info(signups)")}:
+        conn.execute("ALTER TABLE signups ADD COLUMN sms_ok INTEGER NOT NULL DEFAULT 1")
 
 
 def iso(dt: datetime) -> str:

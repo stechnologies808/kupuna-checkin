@@ -144,7 +144,7 @@ def signup_page(cfg, form=None, error=""):
   <label class="check"><input type="checkbox" id="agree_consent" name="agree_consent" {'checked' if form.get('agree_consent') else ''}>
     I understand you'll call my kūpuna to introduce yourselves and get their OK before daily calls begin.</label>
   <label class="check"><input type="checkbox" id="agree_sms" name="agree_sms" {'checked' if form.get('agree_sms') else ''}>
-    <span>I agree to receive check-in alert texts from Kupuna Check-In at the phone numbers above. Message frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. See our <a href="{url_for('terms')}">terms</a> and <a href="{url_for('privacy')}">privacy policy</a>.</span></label>
+    <span><b>Optional:</b> I agree to receive check-in alert texts from Kupuna Check-In at the phone numbers above. Message frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. See our <a href="{url_for('terms')}">terms</a> and <a href="{url_for('privacy')}">privacy policy</a>. Texts aren't required to sign up: leave this unticked and we'll alert you and your backup by phone call only.</span></label>
   <label class="check"><input type="checkbox" id="agree_911" name="agree_911" {'checked' if form.get('agree_911') else ''}>
     I understand this service texts and calls family. It does not call 911 and is not a medical alert system.</label>
   <button type="submit">Sign up</button>
@@ -162,11 +162,11 @@ def thanks_page(cfg, s):
 <h1>You're signed up. Here's what happens next.</h1></section>
 <ol class="steps">
   <li><h3>We call {escape(s['kupuna_name'])}</h3><span class="mu">Usually within 1–2 days, to introduce ourselves and get their OK.</span></li>
-  <li><h3>You get a text</h3><span class="mu">Confirming the start date and call time.</span></li>
+  <li><h3>{'You get a text' if s['sms_ok'] else 'We call you'}</h3><span class="mu">Confirming the start date and call time.</span></li>
   <li><h3>Calls begin</h3><span class="mu">Every day at the time you picked.</span></li>
 </ol>
 {pay}
-<p class="small">Questions? Reply to the text we send you. <a href="{url_for('privacy')}">Privacy policy</a> · <a href="{url_for('terms')}">Terms</a></p>
+<p class="small">Questions? {'Reply to the text we send you.' if s['sms_ok'] else 'Just ask when we call.'} <a href="{url_for('privacy')}">Privacy policy</a> · <a href="{url_for('terms')}">Terms</a></p>
 </main></body></html>""")
 
 
@@ -222,6 +222,8 @@ that every call or alert will be placed or received.</p>
 agreement. You agree that the phone numbers you give us belong to you, the kūpuna and your backup contact, and that your
 backup contact is willing to be contacted.</p>
 <h2>Text messages</h2>
+<p><b>Texts are optional.</b> You can sign up without agreeing to texts; we then alert you and your backup contact by
+phone call only.</p>
 <p><b>Program:</b> Kupuna Check-In alerts. <b>What you receive:</b> alerts when your kūpuna misses a check-in call or asks
 for help, a welcome text when service starts, and a weekly summary. <b>Frequency:</b> varies; most weeks it is one text.
 <b>Message and data rates may apply.</b> Reply <b>STOP</b> to any text to opt out at any time; you will get one text
@@ -266,11 +268,13 @@ def register(app, engine, lock, admin_only, admin_head):
         ip = (request.headers.get("X-Forwarded-For", request.remote_addr or "") or "").split(",")[0].strip()
         if _too_many(ip):
             return signup_page(engine.cfg, f, "Too many sign-ups from this connection. Please try again in an hour."), 429
-        if not (f.get("agree_consent") and f.get("agree_sms") and f.get("agree_911")):
-            return signup_page(engine.cfg, f, "Please tick all three boxes at the bottom to continue."), 400
+        if not (f.get("agree_consent") and f.get("agree_911")):
+            return signup_page(engine.cfg, f, "Please tick the first and last boxes at the bottom to continue. "
+                               "The texting box is optional."), 400
         try:
             with lock:
-                sid = engine.add_signup(**{k: f.get(k, "") for k in engine.SIGNUP_FIELDS})
+                sid = engine.add_signup(sms_ok=bool(f.get("agree_sms")),
+                                        **{k: f.get(k, "") for k in engine.SIGNUP_FIELDS})
                 s = engine.signup(sid)
         except ValueError as e:
             return signup_page(engine.cfg, f, str(e)), 400
@@ -287,9 +291,11 @@ def register(app, engine, lock, admin_only, admin_head):
         flash = request.args.get("msg", "")
         prefill = {"name": s["kupuna_name"], "phone": s["kupuna_phone"], "call_time": s["call_time"],
                    "language": s["language"], "contact1_name": s["family_name"], "contact1_phone": s["family_phone"],
-                   "contact2_name": s["backup_name"], "contact2_phone": s["backup_phone"], "consent_note": ""}
+                   "contact2_name": s["backup_name"], "contact2_phone": s["backup_phone"], "consent_note": "",
+                   "sms_ok": s["sms_ok"]}
         details = (f"<p><b>{escape(s['family_name'])}</b> ({escape(s['relationship'] or 'family')}) · "
                    f"<span class='mono'>{escape(s['family_phone'])}</span> · {escape(s['family_email'])}</p>"
+                   f"<p>Texts: <b>{'Yes, agreed to alert texts' if s['sms_ok'] else 'No, alert by phone call only'}</b></p>"
                    f"<p>Plan: <b>{escape(engine.PLANS.get(s['plan'], s['plan']))}</b> · signed up "
                    f"{escape(engine.local(db.parse(s['created_at'])).strftime('%a %b %-d, %-I:%M %p'))}</p>"
                    + (f"<p>Notes: {escape(s['notes'])}</p>" if s["notes"] else ""))
@@ -313,7 +319,8 @@ def register(app, engine, lock, admin_only, admin_head):
     def admin_signup_approve(signup_id):
         try:
             with lock:
-                engine.approve_signup(signup_id, **{k: request.form.get(k, "") for k in engine.FIELDS})
+                engine.approve_signup(signup_id, sms_ok=request.form.get("sms_ok", "1") == "1",
+                                      **{k: request.form.get(k, "") for k in engine.FIELDS})
         except ValueError as e:
             return redirect(url_for("admin_signup", signup_id=signup_id, msg=str(e)))
         return redirect(url_for("admin"))

@@ -95,6 +95,18 @@ class Engine:
             self.log(checkin, kupuna_id, "error", f"Couldn't {what} {who or to} ({to}): {e}")
             return False
 
+    def _text(self, k: sqlite3.Row, who: str, body: str, checkin=None) -> bool:
+        """Text a contact ('contact1' or 'contact2'), only if they agreed to texts. False if not sent."""
+        if not k["sms_ok"]:
+            return False
+        return self._send("sms", k[f"{who}_phone"], body, checkin, k["id"], k[f"{who}_name"])
+
+    def set_texts(self, kupuna_id: int, on: bool) -> None:
+        k = self.kupuna(kupuna_id)
+        if k and bool(k["sms_ok"]) != on:
+            self.db.execute("UPDATE kupuna SET sms_ok=? WHERE id=?", (int(on), kupuna_id))
+            self.log(None, kupuna_id, "signup", f"Texts to {k['name']}'s contacts turned {'on' if on else 'off'}")
+
     def kupuna(self, kupuna_id: int) -> sqlite3.Row:
         return self.db.execute("SELECT * FROM kupuna WHERE id=?", (kupuna_id,)).fetchone()
 
@@ -133,15 +145,16 @@ class Engine:
         f["call_time"] = "%02d:%s" % (hour, f["call_time"].split(":")[1])
         return f
 
-    def add_kupuna(self, **fields) -> int:
+    def add_kupuna(self, sms_ok: bool = True, **fields) -> int:
         f = self._clean(fields)
         now = iso(self.clock())
         cur = self.db.execute(
-            f"INSERT INTO kupuna ({', '.join(self.FIELDS)}, consent_at, created_at) "
-            f"VALUES ({', '.join('?' * (len(self.FIELDS) + 2))})",
-            (*(f[k] for k in self.FIELDS), now, now),
+            f"INSERT INTO kupuna ({', '.join(self.FIELDS)}, consent_at, created_at, sms_ok) "
+            f"VALUES ({', '.join('?' * (len(self.FIELDS) + 3))})",
+            (*(f[k] for k in self.FIELDS), now, now, int(bool(sms_ok))),
         )
-        self.log(None, cur.lastrowid, "signup", f"Added {f['name']} · calls at {f['call_time']} in {f['language']}")
+        self.log(None, cur.lastrowid, "signup", f"Added {f['name']} · calls at {f['call_time']} in {f['language']}"
+                 + ("" if sms_ok else " · alerts by phone call only (no texts)"))
         return cur.lastrowid
 
     def update_kupuna(self, kupuna_id: int, **fields) -> None:
@@ -168,7 +181,7 @@ class Engine:
     SIGNUP_FIELDS = ("plan", "family_name", "family_phone", "family_email", "relationship", "kupuna_name",
                      "kupuna_phone", "call_time", "language", "backup_name", "backup_phone", "notes")
 
-    def add_signup(self, **fields) -> int:
+    def add_signup(self, sms_ok: bool = False, **fields) -> int:
         f = {k: (fields.get(k) or "").strip() for k in self.SIGNUP_FIELDS}
         missing = [label for k, label in (
             ("family_name", "your name"), ("family_phone", "your phone"), ("family_email", "your email"),
@@ -198,9 +211,9 @@ class Engine:
         if f["language"] not in greetings.GREETING:
             f["language"] = "English"
         cur = self.db.execute(
-            f"INSERT INTO signups (created_at, {', '.join(self.SIGNUP_FIELDS)}) "
-            f"VALUES ({', '.join('?' * (len(self.SIGNUP_FIELDS) + 1))})",
-            (iso(self.clock()), *(f[k] for k in self.SIGNUP_FIELDS)),
+            f"INSERT INTO signups (created_at, sms_ok, {', '.join(self.SIGNUP_FIELDS)}) "
+            f"VALUES ({', '.join('?' * (len(self.SIGNUP_FIELDS) + 2))})",
+            (iso(self.clock()), int(bool(sms_ok)), *(f[k] for k in self.SIGNUP_FIELDS)),
         )
         self.log(None, None, "signup", f"New sign-up: {f['family_name']} for {f['kupuna_name']} ({self.PLANS[f['plan']]})")
         if self.cfg.OWNER_PHONE:
@@ -230,17 +243,18 @@ class Engine:
     def send_welcome(self, kupuna_id: int) -> None:
         """First text to each contact once someone is added: who we are, what to expect, how to stop."""
         k = self.kupuna(kupuna_id)
+        if not k["sms_ok"]:
+            self.log(None, kupuna_id, "signup", f"No welcome texts: {k['name']}'s contacts get alerts by phone call only")
+            return
         n = greetings.short_name(k["name"])
         tail = "Msg & data rates may apply. Reply STOP to opt out, HELP for help."
-        self._send("sms", k["contact1_phone"],
+        self._text(k, "contact1",
                    f"{self.cfg.SERVICE_NAME}: You're signed up as the family contact for {n}'s daily check-in calls. "
-                   f"We'll text you only if {n} misses the morning call, plus a weekly summary. {tail}",
-                   None, kupuna_id, k["contact1_name"])
-        self._send("sms", k["contact2_phone"],
+                   f"We'll text you only if {n} misses the morning call, plus a weekly summary. {tail}")
+        self._text(k, "contact2",
                    f"{self.cfg.SERVICE_NAME}: {k['contact1_name']} listed you as the backup contact for {n}'s daily "
                    f"check-in calls. We'll text you only if {n} misses the morning call and we can't reach "
-                   f"{k['contact1_name']}. {tail}",
-                   None, kupuna_id, k["contact2_name"])
+                   f"{k['contact1_name']}. {tail}")
         self.log(None, kupuna_id, "signup", f"Sent welcome texts to {k['contact1_name']} and {k['contact2_name']}")
 
     def signup(self, signup_id: int) -> sqlite3.Row | None:
@@ -393,9 +407,11 @@ class Engine:
                f"Please check on them. Reply OK once you've reached them. If we don't hear back by "
                f"{self.fmt(deadline)}, we'll contact {k['contact2_name']}. This service does not call 911. Reply STOP to opt out.")
         voice = (f"This is {self.cfg.SERVICE_NAME}. {n} did not answer {c['attempts']} check-in calls this morning. "
-                 f"Please check on them, then reply OK to our text message.")
+                 + ("Please check on them, then reply OK to our text message." if k["sms_ok"] else
+                    f"Please check on them. We will also call {k['contact2_name']} in "
+                    f"{self.cfg.FAMILY_REPLY_WINDOW_MIN} minutes."))
         self.update(c["id"], status="alerted", alerted_at=iso(now), next_at=iso(deadline))
-        texted = self._send("sms", k["contact1_phone"], sms, c, k["id"], k["contact1_name"])
+        texted = self._text(k, "contact1", sms, c)
         called = self._send("alert", k["contact1_phone"], voice, c, k["id"], k["contact1_name"])
         if not (texted or called):
             # family can't be reached at all: go straight to the backup instead of waiting 15 minutes
@@ -412,13 +428,14 @@ class Engine:
                f"{k['contact1_name']}. Please check on them if you can. Reply OK once you've reached them. "
                f"This service does not call 911. Reply STOP to opt out.")
         voice = (f"This is {self.cfg.SERVICE_NAME}. {n} missed this morning's check-in calls and we could not reach "
-                 f"{k['contact1_name']}. Please check on them, then reply OK to our text message.")
+                 f"{k['contact1_name']}. Please check on them"
+                 + (", then reply OK to our text message." if k["sms_ok"] else "."))
         self.update(c["id"], status="backup_alerted", backup_at=iso(now), next_at=None)
-        self._send("sms", k["contact2_phone"], sms, c, k["id"], k["contact2_name"])
+        texted = self._text(k, "contact2", sms, c)
         self._send("alert", k["contact2_phone"], voice, c, k["id"], k["contact2_name"])
         self.log(c, k["id"], "alert",
                  f"No reply from {k['contact1_name']} in {self.cfg.FAMILY_REPLY_WINDOW_MIN} min. "
-                 f"Texted and called backup {k['contact2_name']}.")
+                 f"{'Texted and called' if texted else 'Called'} backup {k['contact2_name']}.")
 
     # ---------- things Twilio tells us ----------
     def keypress(self, checkin_id: int, digit: str) -> str:
@@ -437,20 +454,21 @@ class Engine:
                 self.update(c["id"], status="safe", next_at=None, resolved_by="pressed 1 (late)", resolved_at=iso(now))
                 self.log(c, k["id"], "ok", f"{k['name']} pressed 1 after family was alerted. Marked safe.")
                 n = greetings.short_name(k["name"])
-                self._send("sms", k["contact1_phone"], f"{self.cfg.SERVICE_NAME} update: {n} just pressed 1. They're checked in.",
-                           c, k["id"], k["contact1_name"])
+                self._text(k, "contact1", f"{self.cfg.SERVICE_NAME} update: {n} just pressed 1. They're checked in.", c)
             return "ok"
         if digit == "2":
             n = greetings.short_name(k["name"])
             msg = (f"{self.cfg.SERVICE_NAME}: {n} pressed 2 on their check-in call, which means they asked for help. "
                    f"Please contact them now. Reply OK once you've reached them. If it's an emergency, call 911.")
             voice = (f"This is {self.cfg.SERVICE_NAME}. {n} asked for help on their check-in call. "
-                     f"Please contact them right away, then reply OK to our text message.")
+                     + ("Please contact them right away, then reply OK to our text message." if k["sms_ok"]
+                        else "Please contact them right away."))
             self.update(c["id"], status="help", next_at=None, alerted_at=iso(now))
             for who in ("contact1", "contact2"):
-                self._send("sms", k[f"{who}_phone"], msg, c, k["id"], k[f"{who}_name"])
+                self._text(k, who, msg, c)
                 self._send("alert", k[f"{who}_phone"], voice, c, k["id"], k[f"{who}_name"])
-            self.log(c, k["id"], "alert", f"{k['name']} pressed 2 (asked for help). Texted and called both contacts.")
+            self.log(c, k["id"], "alert", f"{k['name']} pressed 2 (asked for help). "
+                     f"{'Texted and called' if k['sms_ok'] else 'Called'} both contacts.")
             return "help"
         return "unknown"
 
@@ -551,7 +569,7 @@ class Engine:
             if sent:
                 continue
             body = self.weekly_text(k, week_start, week_end)
-            if body and self._send("sms", k["contact1_phone"], body, None, k["id"], k["contact1_name"]):
+            if body and self._text(k, "contact1", body):
                 self.log(None, k["id"], "summary", f"Sent weekly summary to {k['contact1_name']}")
             self.db.execute("INSERT INTO summaries VALUES (?,?,?)", (k["id"], week_end.isoformat(), iso(now)))
 
