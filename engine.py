@@ -517,10 +517,20 @@ class Engine:
         self.log(None, kid, "error", f"Text to {who} was not delivered: {why}{code}")
 
     def texting_blocked_recently(self, days: int = 7) -> bool:
+        """True if a text was blocked for missing registration in the last few days and none has
+        been delivered since (so the banner clears as soon as texting works again)."""
         since = iso(self.clock() - timedelta(days=days))
-        return self.db.execute(
-            "SELECT 1 FROM events WHERE kind='error' AND detail LIKE '%error 30034%' AND at >= ? LIMIT 1",
-            (since,)).fetchone() is not None
+        row = self.db.execute(
+            "SELECT MAX(at) AS at FROM events WHERE kind='error' AND detail LIKE '%error 30034%' AND at >= ?",
+            (since,)).fetchone()
+        if not row or not row["at"]:
+            return False
+        ok = self.db.execute("SELECT value FROM meta WHERE key='last_text_delivered'").fetchone()
+        return not (ok and ok["value"] > row["at"])
+
+    def text_delivered(self) -> None:
+        self.db.execute("INSERT INTO meta (key, value) VALUES ('last_text_delivered', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (iso(self.clock()),))
 
     def family_reply(self, from_phone: str, body: str) -> str:
         """Handle a text from a family contact. Returns the reply to send back."""

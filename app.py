@@ -123,6 +123,9 @@ def sms_status():
     if status in ("undelivered", "failed"):
         with lock:
             engine.text_not_delivered(request.form.get("To", ""), status, request.form.get("ErrorCode", ""))
+    elif status == "delivered":
+        with lock:
+            engine.text_delivered()
     return ("", 204)
 
 

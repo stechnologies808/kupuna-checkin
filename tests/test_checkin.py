@@ -801,6 +801,16 @@ class UndeliveredTexts(unittest.TestCase):
         self.m.engine.clock.go(8 * 24 * 60)
         self.assertNotIn("Texts are being blocked", self.c.get("/admin").get_data(as_text=True))
 
+    def test_banner_clears_once_a_text_gets_through(self):
+        self.c.post("/sms/status", data={"MessageStatus": "undelivered", "To": "+18083922341", "ErrorCode": "30034"})
+        self.assertIn("Texts are being blocked", self.c.get("/admin").get_data(as_text=True))
+        self.m.engine.clock.go(60)  # registration approved later that day
+        self.c.post("/sms/status", data={"MessageStatus": "delivered", "To": "+18083922341"})
+        self.assertNotIn("Texts are being blocked", self.c.get("/admin").get_data(as_text=True))
+        self.m.engine.clock.go(60)  # a new block after that brings it back
+        self.c.post("/sms/status", data={"MessageStatus": "undelivered", "To": "+18083922341", "ErrorCode": "30034"})
+        self.assertIn("Texts are being blocked", self.c.get("/admin").get_data(as_text=True))
+
     def test_owner_alert_failure_is_logged_not_swallowed(self):
         self.m.engine.phone = PickyPhone(bad_sms={"+18085550999"})
         self.m.engine.add_signup(plan="basic", family_name="Kainoa", family_phone="4255550110",

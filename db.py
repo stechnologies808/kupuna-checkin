@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS signups (
     sms_ok          INTEGER NOT NULL DEFAULT 1  -- ticked the optional texting box
 );
 
+CREATE TABLE IF NOT EXISTS meta (
+    key     TEXT PRIMARY KEY,
+    value   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS summaries (
     kupuna_id   INTEGER NOT NULL REFERENCES kupuna(id),
     week_ending TEXT NOT NULL,
